@@ -1,0 +1,35 @@
+{
+  "modelId": "ficus-sample-7000",
+  "simulation": {
+    "frame_dt": 0.02,
+    "frame_num": 8
+  },
+  "preprocessing": {
+    "scale": 1.0,
+    "n_grid": 80,
+    "opacity_threshold": 0.02,
+    "rotation_degree": [0],
+    "rotation_axis": [0],
+    "sim_area": null
+  },
+  "objects": [
+    {
+      "objectId": 1,
+      "bodyId": 1,
+      "name": "preview_body",
+      "material": "jelly",
+      "density": 200,
+      "E": 100000,
+      "nu": 0.3,
+      "fill": false,
+      "indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      "drive": {
+        "linearEnabled": true,
+        "linearForce": [0.2, 0, 0],
+        "linearNumDt": 1,
+        "linearStart": 0,
+        "spinEnabled": false
+      }
+    }
+  ]
+}

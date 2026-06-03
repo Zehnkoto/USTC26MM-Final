@@ -1,0 +1,78 @@
+{
+  "localRoot": "C:/Users/李亭皑/Documents/Codex/2026-05-29",
+  "repoRoot": "C:/Users/李亭皑/Documents/Codex/2026-05-29/github",
+  "ssh": {
+    "identityFile": "C:/Users/李亭皑/Documents/Codex/.ssh/autodl_ustc26mm",
+    "port": 47027,
+    "host": "root@connect.westb.seetacloud.com"
+  },
+  "cloudRoot": "/root/autodl-tmp/ustc26mm",
+  "files": [
+    {
+      "name": "backend",
+      "local": "github/server/phys_backend.py",
+      "cloud": "/root/autodl-tmp/ustc26mm/server/phys_backend.py"
+    },
+    {
+      "name": "physics-panel",
+      "local": "supersplat-src/src/ui/physics-panel.ts",
+      "cloud": "/root/autodl-tmp/ustc26mm/supersplat-src-patched/src/ui/physics-panel.ts"
+    },
+    {
+      "name": "physics-panel-scss",
+      "local": "supersplat-src/src/ui/scss/physics-panel.scss",
+      "cloud": "/root/autodl-tmp/ustc26mm/supersplat-src-patched/src/ui/scss/physics-panel.scss"
+    },
+    {
+      "name": "bottom-toolbar",
+      "local": "supersplat-src/src/ui/bottom-toolbar.ts",
+      "cloud": "/root/autodl-tmp/ustc26mm/supersplat-src-patched/src/ui/bottom-toolbar.ts"
+    },
+    {
+      "name": "editor",
+      "local": "supersplat-src/src/editor.ts",
+      "cloud": "/root/autodl-tmp/ustc26mm/supersplat-src-patched/src/editor.ts"
+    },
+    {
+      "name": "physics-session",
+      "local": "supersplat-src/src/physics-session.ts",
+      "cloud": "/root/autodl-tmp/ustc26mm/supersplat-src-patched/src/physics-session.ts"
+    },
+    {
+      "name": "phys-motion",
+      "local": "supersplat-src/src/phys-motion.ts",
+      "cloud": "/root/autodl-tmp/ustc26mm/supersplat-src-patched/src/phys-motion.ts"
+    },
+    {
+      "name": "mpm-solver",
+      "local": "physgaussian-src/mpm_solver_warp/mpm_solver_warp.py",
+      "cloud": "/root/autodl-tmp/ustc26mm/src/physgaussian-src/mpm_solver_warp/mpm_solver_warp.py"
+    },
+    {
+      "name": "mpm-utils",
+      "local": "physgaussian-src/mpm_solver_warp/mpm_utils.py",
+      "cloud": "/root/autodl-tmp/ustc26mm/src/physgaussian-src/mpm_solver_warp/mpm_utils.py"
+    },
+    {
+      "name": "gs-simulation",
+      "local": "physgaussian-src/gs_simulation.py",
+      "cloud": "/root/autodl-tmp/ustc26mm/src/physgaussian-src/gs_simulation.py"
+    }
+  ],
+  "cloudHealthUrl": "http://127.0.0.1:6006/api/health",
+  "localDist": "supersplat-src/dist",
+  "cloudDist": "/root/autodl-tmp/ustc26mm/supersplat-dist",
+  "keyPatches": [
+    "materialParamDefaults",
+    "mixedBodyObstacleDemotedToMpmCount",
+    "liveProxyDragStart",
+    "liveProxyDragMove",
+    "particle_material_params",
+    "physics.downloadSolverTrace",
+    "newton_trace",
+    "givens_c",
+    "physics-param-help",
+    "elasticity_ratio",
+    "officialConfig.enabled uses"
+  ]
+}
