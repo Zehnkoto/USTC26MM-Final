@@ -316,6 +316,38 @@ def update_cov(state: MPMStateStruct, p: int, grad_v: wp.mat33, dt: float):
     state.particle_cov[p * 6 + 5] = cov_np1[2, 2]
 
 
+@wp.func
+def mpm_zero_mat33():
+    return wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+@wp.func
+def mpm_stencil_in_grid(
+    base_pos_x: int, base_pos_y: int, base_pos_z: int, model: MPMModelStruct
+):
+    return (
+        base_pos_x >= 0
+        and base_pos_y >= 0
+        and base_pos_z >= 0
+        and base_pos_x + 2 < model.grid_dim_x
+        and base_pos_y + 2 < model.grid_dim_y
+        and base_pos_z + 2 < model.grid_dim_z
+    )
+
+
+@wp.func
+def mpm_clamp_to_grid_domain(x: wp.vec3, model: MPMModelStruct):
+    padding = 3.0 * model.dx
+    max_x = model.dx * wp.float(model.grid_dim_x) - padding
+    max_y = model.dx * wp.float(model.grid_dim_y) - padding
+    max_z = model.dx * wp.float(model.grid_dim_z) - padding
+    return wp.vec3(
+        wp.min(wp.max(x[0], padding), max_x),
+        wp.min(wp.max(x[1], padding), max_y),
+        wp.min(wp.max(x[2], padding), max_z),
+    )
+
+
 @wp.kernel
 def p2g_apic_with_stress(state: MPMStateStruct, model: MPMModelStruct, dt: float):
     # input given to p2g:   particle_stress
@@ -329,6 +361,14 @@ def p2g_apic_with_stress(state: MPMStateStruct, model: MPMModelStruct, dt: float
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -386,6 +426,14 @@ def p2g_apic_no_stress(state: MPMStateStruct, model: MPMModelStruct):
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -455,6 +503,14 @@ def g2p(state: MPMStateStruct, model: MPMModelStruct, dt: float):
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -486,8 +542,20 @@ def g2p(state: MPMStateStruct, model: MPMModelStruct, dt: float):
                     dweight = compute_dweight(model, w, dw, i, j, k)
                     new_F = new_F + wp.outer(grid_v, dweight)
 
+        new_x = state.particle_x[p] + dt * new_v
+        new_grid_pos = new_x * model.inv_dx
+        new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
+        new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
+        new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(
+            new_base_pos_x, new_base_pos_y, new_base_pos_z, model
+        ):
+            new_x = mpm_clamp_to_grid_domain(new_x, model)
+            new_v = wp.vec3(0.0, 0.0, 0.0)
+            new_C = mpm_zero_mat33()
+            new_F = mpm_zero_mat33()
         state.particle_v[p] = new_v
-        state.particle_x[p] = state.particle_x[p] + dt * new_v
+        state.particle_x[p] = new_x
         state.particle_C[p] = new_C
         I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
         F_tmp = (I33 + new_F * dt) * state.particle_F[p]
@@ -956,6 +1024,14 @@ def implicit_compute_trial_stress(
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -1024,6 +1100,14 @@ def implicit_accumulate_stiffness_diag(
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -1066,6 +1150,14 @@ def implicit_accumulate_internal_force(
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -1136,6 +1228,14 @@ def g2p_implicit(
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+            state.particle_C[p] = mpm_zero_mat33()
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
         fx = grid_pos - wp.vec3(
             wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
         )
@@ -1170,8 +1270,21 @@ def g2p_implicit(
                     dweight = compute_dweight(model, w, dw, i, j, k)
                     grad_v = grad_v + wp.outer(grid_v, dweight)
 
+        new_x = state.particle_x[p] + new_du
+        new_grid_pos = new_x * model.inv_dx
+        new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
+        new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
+        new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
+        if not mpm_stencil_in_grid(
+            new_base_pos_x, new_base_pos_y, new_base_pos_z, model
+        ):
+            new_x = mpm_clamp_to_grid_domain(new_x, model)
+            new_v = wp.vec3(0.0, 0.0, 0.0)
+            new_du = wp.vec3(0.0, 0.0, 0.0)
+            new_C = mpm_zero_mat33()
+            grad_v = mpm_zero_mat33()
         state.particle_v[p] = new_v
-        state.particle_x[p] = state.particle_x[p] + new_du
+        state.particle_x[p] = new_x
         state.particle_C[p] = new_C
         I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
         state.particle_F_trial[p] = (I33 + grad_v * dt) * state.particle_F[p]
