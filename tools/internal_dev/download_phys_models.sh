@@ -27,6 +27,8 @@ for f in "${files[@]}"; do
   echo "DONE ${f}"
 done
 
-if [[ -f /root/autodl-tmp/ustc26mm/register_official_phys_models.py ]]; then
-  /root/miniconda3/envs/physgaussian/bin/python /root/autodl-tmp/ustc26mm/register_official_phys_models.py
+project_root="${USTC26MM_ROOT:-/root/autodl-tmp/ustc26mm}"
+register_script="${project_root}/tools/internal_dev/register_official_phys_models.py"
+if [[ -f "${register_script}" ]]; then
+  /root/miniconda3/envs/physgaussian/bin/python "${register_script}"
 fi

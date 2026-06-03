@@ -35,6 +35,12 @@
 - 求解器：在 PhysGaussian 基础上扩展 explicit MPM、implicit MPM 和 PBMPM 入口，并输出求解细节 trace。
 - 数据格式：新增 `motion.physmotion.json`、`motion.bin`、`indices.bin`，供 SuperSplat 播放仿真结果。
 
+## 样例数据说明
+
+本仓库不提交第三方训练模型、PLY、checkpoint 或 motion 数据。开发过程中使用的 ficus、bread、plane、wolf 等样例来自 PhysGaussian/DeformSuite 相关公开样例资源；如果在报告或演示中使用这些样例，应额外注明其原始来源和许可。
+
+`tools/internal_dev/` 中的脚本只供内部人员在共享服务器上下载或注册这些样例数据，不代表数据本体随本仓库发布。
+
 ## 第三方参考代码处理
 
 PBMPM 上游源码可按需在本地单独 clone 阅读，但不作为本项目运行时依赖提交。本仓库提交的是 PhysGaussian 中的本地改写实现和必要覆盖源码，避免把第三方嵌套 Git 仓库或演示媒体一起上传。

@@ -2,11 +2,11 @@
 
 SuperSplat + PhysGaussian integrated physics simulation project.
 
-This repository keeps only the project-specific source, tools, documentation,
-and lightweight third-party reference code needed to reproduce the current
-prototype. It does not include generated simulation outputs, trained models,
-server backups, full upstream copies of SuperSplat and PhysGaussian, or nested
-third-party reference checkouts.
+This repository keeps only the project-specific source, tools, and
+documentation needed to reproduce the current prototype. It does not include
+generated simulation outputs, trained models, sample datasets, server backups,
+full upstream copies of SuperSplat and PhysGaussian, or nested third-party
+reference checkouts.
 
 ## Contents
 
@@ -16,6 +16,8 @@ third-party reference checkouts.
   the PhysGaussian/Warp MPM path.
 - `tools/` - cloud sync, health check, run inspection, and motion/trace
   debugging utilities.
+- `tools/internal_dev/` - internal helper scripts for server-side sample data
+  registration and preview debugging. They do not include sample data.
 - `docs/` - project documentation.
 
 ## Documentation

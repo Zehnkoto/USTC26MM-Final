@@ -44,6 +44,7 @@
 
 - `server/`：本项目新增后端桥接服务。
 - `tools/`：同步、检查和调试脚本。
+- `tools/internal_dev/`：内部开发用的第三方样例数据下载、注册和 preview 调试脚本，不包含数据本体。
 - `src-overrides/`：需要覆盖到 SuperSplat 和 PhysGaussian 上游仓库的必要源码。
 - `docs/`：引用说明、使用说明、完成情况和同步策略。
 

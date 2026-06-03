@@ -101,16 +101,26 @@ curl -k https://u1002897-ak8t-c0a1825e.westb.seetacloud.com:8443/api/health
 
 注意：`8448` 当前没有服务监听或公网转发，不应作为本项目预览入口。
 
-## 7. 注册示例模型
+## 7. 内部样例数据工具
 
-如果已有 ficus 示例模型，可以用项目脚本注册：
+本仓库不包含第三方样例数据、训练模型、PLY、checkpoint 或 motion 缓存。开发时使用的 ficus、bread、plane、wolf 等样例需要从 PhysGaussian/DeformSuite 等原始来源另行获取，并按其许可引用。
+
+如果内部开发人员在共享服务器上已经具备这些样例数据，可以使用 `tools/internal_dev/` 中的脚本下载或注册样例模型：
 
 ```bash
 cd ~/ustc26mm/USTC26MM-Final
-python tools/register_ficus_7000.py
+
+# 下载/解压官方样例数据，并批量注册到后端 work/models
+bash tools/internal_dev/download_phys_models.sh
+
+# 或只注册已经存在的官方样例目录
+python tools/internal_dev/register_official_phys_models.py
+
+# 或只注册 ficus iteration-7000 内部样例
+python tools/internal_dev/register_ficus_7000.py
 ```
 
-也可以通过后端 API 上传或注册其他训练好的 3DGS/PhysGaussian 模型。后端会寻找 `point_cloud/iteration_*/point_cloud.ply` 作为预览和仿真输入。
+这些脚本包含服务器路径假设，主要供内部开发和复现实验使用；正式部署也可以通过后端 API 上传或注册其他训练好的 3DGS/PhysGaussian 模型。后端会寻找 `point_cloud/iteration_*/point_cloud.ply` 作为预览和仿真输入。
 
 ## 8. 同步到现有云端工作区
 
