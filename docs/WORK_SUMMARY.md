@@ -37,7 +37,7 @@
 - 服务器端 `phys_backend` 已正常启动在内部 `0.0.0.0:6006`。
 - 公网预览通过 `8443` 访问，`8448` 当前不可用。
 - PBMPM 修复代码已同步到服务器，远端 `mpm_utils.py` 的 SHA-256 为 `7ca62716bfa2157110d96a60b072b0925b179369f90b1b890e43145af670162d`。
-- 上一次完整 PBMPM 失败原因是 P2G PBMPM kernel 越界触发 CUDA illegal memory access；修复后已提交 smoke run，但最终仿真结果仍需在服务器恢复稳定后继续验证。
+- 上一次完整 PBMPM 失败原因是 P2G PBMPM kernel 越界触发 CUDA illegal memory access；修复后仍需继续验证完整仿真结果。
 - 隐式 MPM 可以跑通，但 30 帧 ficus 级别示例约 12 分钟，主要慢在大量 substep 和 Newton/GMRES 迭代；动画加载慢则主要来自 dense motion 二进制体积。
 
 ## 代码组织
