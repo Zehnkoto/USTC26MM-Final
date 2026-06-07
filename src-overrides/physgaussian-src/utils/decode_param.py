@@ -4,6 +4,17 @@ from mpm_solver_warp.mpm_solver_warp import MPM_Simulator_WARP
 from mpm_solver_warp.engine_utils import *
 
 
+def normalize_integrator_name(integrator):
+    name = str(integrator).strip().lower().replace("-", "_")
+    if name in ("implicit", "implicit_mpm"):
+        return "implicit"
+    if name in ("explicit", "explicit_mpm", "mpm"):
+        return "explicit"
+    if name in ("pbmpm", "pb_mpm"):
+        return "pbmpm"
+    raise ValueError(f"Unknown integrator '{integrator}'")
+
+
 def decode_param_json(json_file):
     f = open(json_file)
     sim_params = json.load(f)
@@ -74,7 +85,9 @@ def decode_param_json(json_file):
         material_params["opacity_threshold"] = sim_params["opacity_threshold"]
 
     if "grid_v_damping_scale" in sim_params.keys():
-        material_params["grid_v_damping_scale"] = sim_params["grid_v_damping_scale"]
+        material_params["grid_v_damping_scale"] = max(
+            0.0, min(float(sim_params["grid_v_damping_scale"]), 1.0)
+        )
 
     if "additional_material_params" in sim_params.keys():
         additional_params = sim_params["additional_material_params"]
@@ -94,6 +107,12 @@ def decode_param_json(json_file):
             if not "density" in additional_params[i].keys():
                 additional_params[i]["density"] = material_params["density"]
 
+            if (
+                not "yield_stress" in additional_params[i].keys()
+                and "yield_stress" in material_params
+            ):
+                additional_params[i]["yield_stress"] = material_params["yield_stress"]
+
         material_params["additional_material_params"] = additional_params
 
     if "particle_material_params" in sim_params.keys():
@@ -110,6 +129,12 @@ def decode_param_json(json_file):
 
             if not "density" in particle_params[i].keys():
                 particle_params[i]["density"] = material_params["density"]
+
+            if (
+                not "yield_stress" in particle_params[i].keys()
+                and "yield_stress" in material_params
+            ):
+                particle_params[i]["yield_stress"] = material_params["yield_stress"]
 
         material_params["particle_material_params"] = particle_params
 
@@ -136,7 +161,7 @@ def decode_param_json(json_file):
         time_params["frame_num"] = 100
 
     if "integrator" in sim_params.keys():
-        time_params["integrator"] = sim_params["integrator"]
+        time_params["integrator"] = normalize_integrator_name(sim_params["integrator"])
     else:
         time_params["integrator"] = "explicit"
 
@@ -144,25 +169,46 @@ def decode_param_json(json_file):
         implicit_params = sim_params["implicit_mpm"]
     else:
         implicit_params = {}
+    implicit_adaptive_max_split = max(
+        0, int(implicit_params.get("adaptive_max_split", 3))
+    )
+    implicit_adaptive_min_dt_default = max(
+        float(time_params["substep_dt"]) / (2.0 ** max(implicit_adaptive_max_split, 1)),
+        1e-8,
+    )
     time_params["implicit_mpm"] = {
         "beta": implicit_params.get("beta", 0.25),
         "gamma": implicit_params.get("gamma", 0.5),
-        "newton_tol": implicit_params.get("newton_tol", 1e-4),
+        "newton_tol": implicit_params.get("newton_tol", 5e-4),
         "newton_abs_tol": implicit_params.get("newton_abs_tol", 1e-6),
-        "newton_max_iter": implicit_params.get("newton_max_iter", 8),
+        "newton_rms_tol": implicit_params.get("newton_rms_tol", 1e-4),
+        "newton_max_iter": implicit_params.get("newton_max_iter", 16),
         "gmres_tol": implicit_params.get("gmres_tol", 1e-3),
+        "gmres_tol_floor": implicit_params.get("gmres_tol_floor", 1e-3),
         "gmres_max_iter": implicit_params.get("gmres_max_iter", 24),
         "jvp_eps": implicit_params.get("jvp_eps", 1e-4),
         "line_search_max_iter": implicit_params.get("line_search_max_iter", 8),
         "armijo_c1": implicit_params.get("armijo_c1", 1e-4),
-        "ew_eta_min": implicit_params.get("ew_eta_min", 1e-5),
-        "ew_eta_max": implicit_params.get("ew_eta_max", 0.5),
+        "ew_eta_min": implicit_params.get("ew_eta_min", 1e-3),
+        "ew_eta_max": implicit_params.get("ew_eta_max", 0.1),
         "ew_gamma": implicit_params.get("ew_gamma", 0.9),
         "ew_alpha": implicit_params.get("ew_alpha", 1.5),
         "stiffness_preconditioner_scale": implicit_params.get(
             "stiffness_preconditioner_scale", 1.0
         ),
         "stagnation_tol": implicit_params.get("stagnation_tol", 1e-8),
+        "allow_best_effort_commit": implicit_params.get(
+            "allow_best_effort_commit", False
+        ),
+        "near_converged_factor": implicit_params.get("near_converged_factor", 2.0),
+        "near_newton_rms_tol": implicit_params.get("near_newton_rms_tol", 1e-4),
+        "fallback_descent_tol": implicit_params.get("fallback_descent_tol", 1e-8),
+        "fallback_step_min_rel": implicit_params.get("fallback_step_min_rel", 1e-8),
+        "fallback_decrease_tol": implicit_params.get("fallback_decrease_tol", 1e-6),
+        "adaptive_max_split": implicit_adaptive_max_split,
+        "adaptive_min_dt": implicit_params.get(
+            "adaptive_min_dt", implicit_adaptive_min_dt_default
+        ),
     }
 
     if "pbmpm" in sim_params.keys():
@@ -170,19 +216,25 @@ def decode_param_json(json_file):
     else:
         pbmpm_params = {}
     time_params["pbmpm"] = {
-        "iteration_count": pbmpm_params.get(
-            "iteration_count", pbmpm_params.get("projection_iterations", 1)
+        "strength_scale": pbmpm_params.get(
+            "strength_scale", pbmpm_params.get("stiffness_scale", 1.0)
         ),
-        "elasticity_ratio": pbmpm_params.get(
-            "elasticity_ratio", pbmpm_params.get("r_scale", 1.0)
+        "n_min": pbmpm_params.get(
+            "n_min", pbmpm_params.get("N_min", pbmpm_params.get("nMin", 3))
         ),
-        "elastic_relaxation": pbmpm_params.get(
-            "elastic_relaxation", pbmpm_params.get("s_scale", 1.5)
+        "n_max": pbmpm_params.get(
+            "n_max", pbmpm_params.get("N_max", pbmpm_params.get("nMax", 25))
         ),
-        "plasticity": pbmpm_params.get("plasticity", 0.0),
+        "plastic_mode": pbmpm_params.get("plastic_mode", 0),
+        # PBMPM stretch clamp bounds, not material yield_stress.
         "yield_min": pbmpm_params.get("yield_min", 0.55),
         "yield_max": pbmpm_params.get("yield_max", 1.85),
     }
+
+    if "explicit_mpm" in sim_params.keys():
+        time_params["explicit_mpm"] = sim_params["explicit_mpm"]
+    else:
+        time_params["explicit_mpm"] = {}
 
     # preprocessing_params
     preprocessing_params = {}
@@ -309,10 +361,37 @@ def set_boundary_conditions(
     mpm_solver: MPM_Simulator_WARP, bc_params: dict, time_params: dict
 ):
     for bc in bc_params:
-        if bc["type"] == "cuboid":
-            assert (
-                "point" in bc.keys() and "size" in bc.keys() and "velocity" in bc.keys()
-            )
+        bc_type = bc.get("type")
+        constraint_type = bc.get("constraint_type")
+        is_velocity_cuboid = bc_type in {
+            "cuboid",
+            "set_velocity_on_cuboid",
+            "velocity_cuboid",
+            "fixed_cuboid",
+            "dirichlet_cuboid",
+        } or constraint_type in {
+            "set_velocity_on_cuboid",
+            "velocity_cuboid",
+            "fixed_cuboid",
+            "dirichlet_cuboid",
+        }
+        if is_velocity_cuboid:
+            if "point" not in bc and "center" in bc:
+                bc["point"] = bc["center"]
+            if "size" not in bc and "scale" in bc:
+                bc["size"] = [0.5 * abs(float(value)) for value in bc["scale"]]
+            if "point" not in bc and "min" in bc and "max" in bc:
+                bc["point"] = [
+                    0.5 * (float(lo) + float(hi))
+                    for lo, hi in zip(bc["min"], bc["max"])
+                ]
+                bc["size"] = [
+                    0.5 * abs(float(hi) - float(lo))
+                    for lo, hi in zip(bc["min"], bc["max"])
+                ]
+            if "velocity" not in bc and "target_velocity" in bc:
+                bc["velocity"] = bc["target_velocity"]
+            assert "point" in bc and "size" in bc and "velocity" in bc
             start_time = 0.0
             end_time = 1e3
             reset = 0
@@ -357,12 +436,10 @@ def set_boundary_conditions(
             )
         elif bc["type"] == "fixed_particle_indices":
             assert "indices" in bc.keys()
-            velocity = bc["velocity"] if "velocity" in bc.keys() else [0, 0, 0]
-            start_time = bc["start_time"] if "start_time" in bc.keys() else 0.0
-            end_time = bc["end_time"] if "end_time" in bc.keys() else 1e3
-            reset_deformation = (
-                bc["reset_deformation"] if "reset_deformation" in bc.keys() else 1
-            )
+            velocity = bc.get("velocity", [0.0, 0.0, 0.0])
+            start_time = bc.get("start_time", 0.0)
+            end_time = bc.get("end_time", 1e3)
+            reset_deformation = bc.get("reset_deformation", bc.get("reset", 1))
             mpm_solver.fix_particles_by_indices(
                 indices=bc["indices"],
                 velocity=velocity,

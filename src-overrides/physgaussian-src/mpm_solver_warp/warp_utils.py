@@ -30,8 +30,10 @@ class MPMModelStruct:
     plastic_viscosity: float
     softening: float
 
-    ####### for damping
+    ####### for damping / transfer mode
     rpic_damping: float
+    # Global grid velocity damping scale. 1.0 disables damping; values below 1.0
+    # attenuate grid velocities after grid normalization.
     grid_v_damping_scale: float
 
     ####### for PhysGaussian: covariance
@@ -40,7 +42,7 @@ class MPMModelStruct:
     ####### PBMPM-inspired local/global constraints
     pbmpm_elasticity_ratio: float
     pbmpm_elastic_relaxation: float
-    pbmpm_plasticity: float
+    pbmpm_plastic_mode: int
     pbmpm_yield_min: float
     pbmpm_yield_max: float
 
@@ -161,6 +163,7 @@ class MaterialParamsModifier:
     E: float
     nu: float
     density: float
+    yield_stress: float
 
 
 @wp.struct
@@ -282,6 +285,25 @@ def torch2warp_float(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
         owner=False,
         requires_grad=t.requires_grad,
         # device=t.device.type)
+        device=dvc,
+    )
+    a.tensor = t
+    return a
+
+
+def torch2warp_int(t, copy=False, dtype=warp.types.int32, dvc="cuda:0"):
+    assert t.is_contiguous()
+    if t.dtype != torch.int32:
+        raise RuntimeError(
+            "Error aliasing Torch tensor to Warp array. Torch tensor must be int32 type"
+        )
+    a = warp.types.array(
+        ptr=t.data_ptr(),
+        dtype=int,
+        shape=t.shape[0],
+        copy=False,
+        owner=False,
+        requires_grad=t.requires_grad,
         device=dvc,
     )
     a.tensor = t

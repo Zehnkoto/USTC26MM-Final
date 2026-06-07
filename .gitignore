@@ -9,12 +9,26 @@
 *.pid
 *.out
 *.err
+*.tmp
+*.bak
+*.backup
+*.copy
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
 
 # Local/generated data
 demo_assets/
 upload_models/
 server_backups/
 notes/
+recovery_packages/
+outputs/
+logs/
+checkpoints/
+reports/
+.ipynb_checkpoints/
 tools/codex_history_export/
 docs/rendered_plan/
 docs/build_work_plan_*.py
@@ -24,6 +38,7 @@ server/smoke_payload_*.json
 tools/test_*.py
 tools/*payload*.json
 tools/rigid_preview_payload.json
+tools/workspace_manifest.json
 src-overrides/**/tests/
 src-overrides/**/config/*smoke*.json
 

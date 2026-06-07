@@ -18,6 +18,37 @@ type ObjectDrive = {
     spinEnd: number;
 };
 
+type Bounds3 = {
+    min: number[];
+    max: number[];
+};
+
+type BoundaryConstraintPreview = {
+    type: 'velocity_cuboid';
+    constraint_type: 'set_velocity_on_cuboid';
+    source: 'obstacle_part';
+    objectId: number;
+    bodyId: number;
+    coordinateSpace: 'mpm_shifted_normalized';
+    sceneBounds: Bounds3;
+    simArea: number[];
+    mpmBounds: Bounds3;
+    paddedMpmBounds: Bounds3;
+    point: number[];
+    size: number[];
+    scale: number[];
+    velocity: number[];
+    start_time: number;
+    end_time: number;
+    reset: number;
+    gridDx: number;
+    padding: number;
+    paddingGridNodes: number;
+    estimatedGridNodeCounts: number[];
+    estimatedGridNodeCount: number;
+    gridIndexBounds: Bounds3;
+};
+
 type PhysicsObject = {
     objectId: number;
     bodyId: number;
@@ -27,6 +58,8 @@ type PhysicsObject = {
     E: number;
     nu: number;
     mode: 'mpm' | 'rigid-soft' | 'rigid-body' | 'obstacle';
+    constraintMode?: 'grid-velocity-cuboid';
+    cuboidPaddingGridNodes?: number;
     fill: boolean;
     drive: ObjectDrive;
     count: number;
@@ -39,6 +72,7 @@ type PhysicsObject = {
         min: number[];
         max: number[];
     };
+    boundaryDebug?: BoundaryConstraintPreview | null;
 };
 
 type PhysicsPayload = {
@@ -72,6 +106,7 @@ type PhysicsPayload = {
         frame_dt: number;
         frame_num: number;
         substep_dt: number;
+        damping?: number;
         implicitBeta?: number;
         implicitGamma?: number;
         newtonTol?: number;
@@ -89,12 +124,13 @@ type PhysicsPayload = {
         stiffnessPreconditionerScale?: number;
         stagnationTol?: number;
         pbmpm?: {
-            iteration_count: number;
-            elasticity_ratio: number;
-            elastic_relaxation: number;
-            plasticity: number;
-            yield_min: number;
-            yield_max: number;
+            strength_scale?: number;
+            stiffness_scale?: number;
+            n_min?: number;
+            n_max?: number;
+            plastic_mode?: number;
+            yield_min?: number;
+            yield_max?: number;
         };
         preview?: {
             dragHitIndex?: number;
@@ -114,6 +150,7 @@ type PhysicsPayload = {
             shapeStiffness?: number;
         };
     };
+    boundaryConstraints: BoundaryConstraintPreview[];
     objects: PhysicsObject[];
     selectedCount: number;
 };
@@ -122,6 +159,7 @@ const eulerScratch = new Vec3();
 const pointScratch = new Vec3();
 const rotatedScratch = new Vec3();
 const physicsRotationScratch = new Quat();
+const mpmGridLim = 2.0;
 
 const materialDefaults: Record<MaterialPreset, { E: number, nu: number, density: number, mode: PhysicsObject['mode'] }> = {
     jelly: { E: 1e5, nu: 0.3, density: 200, mode: 'mpm' },
@@ -1029,9 +1067,9 @@ const stepLocalProxyMpm = (
     for (const [key, momentum] of nodeMomentum) {
         const mass = Math.max(nodeMass.get(key) ?? 0, 1e-12);
         const velocity = [
-            (momentum[0] / mass + gravity[0] * dt) * 0.995,
-            (momentum[1] / mass + gravity[1] * dt) * 0.995,
-            (momentum[2] / mass + gravity[2] * dt) * 0.995
+            momentum[0] / mass + gravity[0] * dt,
+            momentum[1] / mass + gravity[1] * dt,
+            momentum[2] / mass + gravity[2] * dt
         ];
         if (groundZ !== null) {
             const iz = Number(key.split(',')[2]);
@@ -1178,7 +1216,7 @@ const registerPhysicsSessionEvents = (events: Events) => {
     let simAreaLocal: { min: number[], max: number[] } | null = null;
     let simAreaIndices: number[] | null = null;
     let scale = 1;
-    let nGrid = 100;
+    let nGrid = 50;
     let opacityThreshold = 0.02;
     let modelId = '';
     let modelInfo: any = null;
@@ -1197,27 +1235,12 @@ const registerPhysicsSessionEvents = (events: Events) => {
         frame_dt: 0.02,
         frame_num: 30,
         substep_dt: 1e-4,
-        implicitBeta: 0.25,
-        implicitGamma: 0.5,
-        newtonTol: 1e-4,
-        newtonAbsTol: 1e-6,
-        newtonMaxIter: 8,
-        gmresTol: 1e-3,
-        gmresMaxIter: 24,
-        jvpEps: 1e-4,
-        lineSearchMaxIter: 8,
-        armijoC1: 1e-4,
-        ewEtaMin: 1e-5,
-        ewEtaMax: 0.5,
-        ewGamma: 0.9,
-        ewAlpha: 1.5,
-        stiffnessPreconditionerScale: 1.0,
-        stagnationTol: 1e-8,
+        damping: 0.9999,
+        newtonMaxIter: 16,
         pbmpm: {
-            iteration_count: 1,
-            elasticity_ratio: 1.0,
-            elastic_relaxation: 1.5,
-            plasticity: 0.0,
+            n_min: 3,
+            n_max: 25,
+            plastic_mode: 0,
             yield_min: 0.55,
             yield_max: 1.85
         }
@@ -1321,6 +1344,155 @@ const registerPhysicsSessionEvents = (events: Events) => {
         }
     };
 
+    const boundsToSimArea = (aabb: Bounds3 | null) => (
+        aabb ? [
+            aabb.min[0],
+            aabb.max[0],
+            aabb.min[1],
+            aabb.max[1],
+            aabb.min[2],
+            aabb.max[2]
+        ] : null
+    );
+
+    const unionPhysicsAabb = (items: PhysicsObject[]) => {
+        const min = [Infinity, Infinity, Infinity];
+        const max = [-Infinity, -Infinity, -Infinity];
+        let found = false;
+        for (const item of items) {
+            const aabb = item.aabbWorld;
+            if (!aabb?.min || !aabb?.max) {
+                continue;
+            }
+            found = true;
+            for (let axis = 0; axis < 3; ++axis) {
+                min[axis] = Math.min(min[axis], Number(aabb.min[axis]));
+                max[axis] = Math.max(max[axis], Number(aabb.max[axis]));
+            }
+        }
+        return found ? { min, max } : null;
+    };
+
+    const gridNodeStats = (bounds: Bounds3, gridDx: number) => {
+        const counts = [0, 0, 0];
+        const indexMin = [0, 0, 0];
+        const indexMax = [-1, -1, -1];
+        for (let axis = 0; axis < 3; ++axis) {
+            let first = -1;
+            let last = -1;
+            for (let index = 0; index < Math.max(0, Math.floor(nGrid)); ++index) {
+                const coord = index * gridDx;
+                if (bounds.min[axis] < coord && coord < bounds.max[axis]) {
+                    if (first < 0) {
+                        first = index;
+                    }
+                    last = index;
+                    counts[axis]++;
+                }
+            }
+            indexMin[axis] = first < 0 ? 0 : first;
+            indexMax[axis] = last;
+        }
+        return {
+            counts,
+            count: counts[0] * counts[1] * counts[2],
+            indexBounds: {
+                min: indexMin,
+                max: indexMax
+            }
+        };
+    };
+
+    const buildVelocityCuboidPreview = (
+        object: PhysicsObject,
+        simAreaForConstraints: number[]
+    ): BoundaryConstraintPreview | null => {
+        if (object.material !== 'obstacle' && object.mode !== 'obstacle') {
+            return null;
+        }
+        const aabb = object.aabbWorld;
+        if (!aabb?.min || !aabb?.max || simAreaForConstraints.length !== 6) {
+            return null;
+        }
+
+        const simMin = [simAreaForConstraints[0], simAreaForConstraints[2], simAreaForConstraints[4]];
+        const simMax = [simAreaForConstraints[1], simAreaForConstraints[3], simAreaForConstraints[5]];
+        const simCenter = [
+            (simMin[0] + simMax[0]) * 0.5,
+            (simMin[1] + simMax[1]) * 0.5,
+            (simMin[2] + simMax[2]) * 0.5
+        ];
+        const maxDiff = Math.max(simMax[0] - simMin[0], simMax[1] - simMin[1], simMax[2] - simMin[2]);
+        if (!Number.isFinite(maxDiff) || maxDiff <= 1e-12) {
+            return null;
+        }
+        const factor = scale / maxDiff;
+        const toMpm = (value: number, axis: number) => (value - simCenter[axis]) * factor + 1.0;
+        const mpmMin = [
+            toMpm(Number(aabb.min[0]), 0),
+            toMpm(Number(aabb.min[1]), 1),
+            toMpm(Number(aabb.min[2]), 2)
+        ];
+        const mpmMax = [
+            toMpm(Number(aabb.max[0]), 0),
+            toMpm(Number(aabb.max[1]), 1),
+            toMpm(Number(aabb.max[2]), 2)
+        ];
+        const gridDx = mpmGridLim / Math.max(Math.floor(nGrid), 1);
+        const paddingGridNodes = Math.max(0, Number(object.cuboidPaddingGridNodes ?? 2) || 0);
+        const padding = gridDx * paddingGridNodes;
+        const paddedMin = [0, 1, 2].map(axis => Math.min(mpmMin[axis], mpmMax[axis]) - padding);
+        const paddedMax = [0, 1, 2].map(axis => Math.max(mpmMin[axis], mpmMax[axis]) + padding);
+        for (let axis = 0; axis < 3; ++axis) {
+            const center = (paddedMin[axis] + paddedMax[axis]) * 0.5;
+            const minHalf = Math.max(gridDx * paddingGridNodes, gridDx * 1.01);
+            if ((paddedMax[axis] - paddedMin[axis]) * 0.5 < minHalf) {
+                paddedMin[axis] = center - minHalf;
+                paddedMax[axis] = center + minHalf;
+            }
+        }
+
+        const paddedBounds = { min: paddedMin, max: paddedMax };
+        const stats = gridNodeStats(paddedBounds, gridDx);
+        const hasLinearDrive = object.drive.linearEnabled &&
+            object.drive.linearForce.some(value => Math.abs(Number(value) || 0) > 1e-12);
+        const velocity = hasLinearDrive ? object.drive.linearForce.slice(0, 3) : [0, 0, 0];
+        const start = hasLinearDrive ? object.drive.linearStart : 0;
+        const end = hasLinearDrive ? start + Math.max(1, object.drive.linearNumDt) * simulation.substep_dt : 1e3;
+
+        return {
+            type: 'velocity_cuboid',
+            constraint_type: 'set_velocity_on_cuboid',
+            source: 'obstacle_part',
+            objectId: object.objectId,
+            bodyId: object.bodyId ?? object.objectId,
+            coordinateSpace: 'mpm_shifted_normalized',
+            sceneBounds: {
+                min: aabb.min.slice(0, 3),
+                max: aabb.max.slice(0, 3)
+            },
+            simArea: simAreaForConstraints.slice(0, 6),
+            mpmBounds: {
+                min: [0, 1, 2].map(axis => Math.min(mpmMin[axis], mpmMax[axis])),
+                max: [0, 1, 2].map(axis => Math.max(mpmMin[axis], mpmMax[axis]))
+            },
+            paddedMpmBounds: paddedBounds,
+            point: [0, 1, 2].map(axis => (paddedMin[axis] + paddedMax[axis]) * 0.5),
+            size: [0, 1, 2].map(axis => (paddedMax[axis] - paddedMin[axis]) * 0.5),
+            scale: [0, 1, 2].map(axis => paddedMax[axis] - paddedMin[axis]),
+            velocity,
+            start_time: start,
+            end_time: end,
+            reset: 1,
+            gridDx,
+            padding,
+            paddingGridNodes,
+            estimatedGridNodeCounts: stats.counts,
+            estimatedGridNodeCount: stats.count,
+            gridIndexBounds: stats.indexBounds
+        };
+    };
+
     const setSimAreaFromAabb = (aabb: { min: number[], max: number[] }, indices?: number[]) => {
         const min = aabb.min;
         const max = aabb.max;
@@ -1349,6 +1521,22 @@ const registerPhysicsSessionEvents = (events: Events) => {
                 activeSimArea.max[2]
             ];
         }
+        const objectList = Array.from(objects.values()).map(object => ({
+            ...object,
+            drive: JSON.parse(JSON.stringify(object.drive)),
+            indices: object.indices.slice(),
+            boundaryDebug: null as BoundaryConstraintPreview | null
+        }));
+        const constraintSimArea = boundsToSimArea(activeSimArea) ?? boundsToSimArea(unionPhysicsAabb(objectList));
+        const boundaryConstraints = constraintSimArea
+            ? objectList
+                .map(object => buildVelocityCuboidPreview(object, constraintSimArea))
+                .filter((constraint): constraint is BoundaryConstraintPreview => !!constraint)
+            : [];
+        const constraintByObject = new Map(boundaryConstraints.map(constraint => [constraint.objectId, constraint]));
+        for (const object of objectList) {
+            object.boundaryDebug = constraintByObject.get(object.objectId) ?? null;
+        }
         return {
             version: 'phys-ui-v1',
             solver,
@@ -1372,11 +1560,8 @@ const registerPhysicsSessionEvents = (events: Events) => {
                 opacity_threshold: opacityThreshold
             },
             simulation: JSON.parse(JSON.stringify(simulation)),
-            objects: Array.from(objects.values()).map(object => ({
-                ...object,
-                drive: JSON.parse(JSON.stringify(object.drive)),
-                indices: object.indices.slice()
-            })),
+            boundaryConstraints,
+            objects: objectList,
             selectedCount
         };
     };
@@ -1472,7 +1657,8 @@ const registerPhysicsSessionEvents = (events: Events) => {
             gravityEnabled: !!officialSimulation.gravityEnabled,
             gravity: Array.isArray(officialSimulation.gravity) ? officialSimulation.gravity.slice() : [0, 0, 0],
             frame_dt: officialSimulation.frame_dt ?? simulation.frame_dt,
-            substep_dt: officialSimulation.substep_dt ?? simulation.substep_dt
+            substep_dt: officialSimulation.substep_dt ?? simulation.substep_dt,
+            damping: officialSimulation.damping ?? officialSimulation.grid_v_damping_scale ?? simulation.damping
         };
     };
 
@@ -1490,7 +1676,7 @@ const registerPhysicsSessionEvents = (events: Events) => {
         return modelInfo;
     };
 
-    const loadMotionFromRun = async (run: any, options: { frameCount?: number, includeBase?: boolean } = {}) => {
+    const loadMotionFromRun = async (run: any, options: { frameCount?: number, availableFrames?: number, includeBase?: boolean, includeProxy?: boolean } = {}) => {
         const result = run?.result ?? run;
         const runId = run?.runId ?? result?.runId;
         if (runId) {
@@ -1519,14 +1705,15 @@ const registerPhysicsSessionEvents = (events: Events) => {
                 filename: 'motion.physmotion.json',
                 url: manifestUrl
             };
-            if (options.frameCount !== undefined) {
+            const limitedAvailableFrames = options.availableFrames ?? options.frameCount;
+            if (limitedAvailableFrames !== undefined) {
                 const response = await fetch(manifestUrl);
                 if (!response.ok) {
                     throw new Error(`failed to read motion manifest: ${response.status} ${response.statusText}`);
                 }
                 const manifest = await response.json();
-                const fullFrameCount = Number(manifest.frameCount) || options.frameCount;
-                manifest.frameCount = Math.max(1, Math.min(options.frameCount, fullFrameCount));
+                const fullFrameCount = Number(manifest.frameCount) || limitedAvailableFrames;
+                manifest.availableFrames = Math.max(1, Math.min(limitedAvailableFrames, fullFrameCount));
                 manifestFile = {
                     filename: 'motion.physmotion.json',
                     contents: new File([JSON.stringify(manifest)], 'motion.physmotion.json', { type: 'application/json' })
@@ -1539,7 +1726,7 @@ const registerPhysicsSessionEvents = (events: Events) => {
             if (indicesUrl) {
                 files.push({ filename: 'indices.bin', url: indicesUrl });
             }
-            if (proxyMotionUrl && proxySkinningUrl) {
+            if (options.includeProxy === true && proxyMotionUrl && proxySkinningUrl) {
                 files.push(
                     { filename: 'proxy_motion.bin', url: proxyMotionUrl },
                     { filename: 'proxy_skinning.bin', url: proxySkinningUrl }
@@ -2387,7 +2574,7 @@ const registerPhysicsSessionEvents = (events: Events) => {
         return true;
     };
 
-    const pollRun = async (runId: string) => {
+    const pollRun = async (runId: string, options: { includeProxy?: boolean } = {}) => {
         currentRunId = runId;
         let streamLoaded = false;
         let streamedFrames = 0;
@@ -2414,17 +2601,29 @@ const registerPhysicsSessionEvents = (events: Events) => {
                 availableFrames > 0 &&
                 (!streamLoaded || availableFrames >= streamedFrames + 4);
             if (shouldRefreshStream) {
-                await loadMotionFromRun(run, {
-                    frameCount: availableFrames,
-                    includeBase: !streamLoaded
-                });
+                if (!streamLoaded) {
+                    await loadMotionFromRun(run, {
+                        availableFrames,
+                        includeBase: true,
+                        includeProxy: options.includeProxy === true
+                    });
+                } else {
+                    events.invoke('physmotion.extendAvailableFrames', availableFrames);
+                }
                 streamLoaded = true;
                 streamedFrames = availableFrames;
                 events.fire('physics.status', `streaming preview: ${availableFrames}/${run.frameCount ?? '?'} frames`);
             }
 
             if (run.status === 'completed') {
-                await loadMotionFromRun(run, { includeBase: !streamLoaded });
+                if (streamLoaded) {
+                    events.invoke('physmotion.extendAvailableFrames', run.frameCount ?? availableFrames);
+                } else {
+                    await loadMotionFromRun(run, {
+                        includeBase: true,
+                        includeProxy: options.includeProxy === true
+                    });
+                }
                 currentRunId = '';
                 return run;
             }
@@ -2544,7 +2743,11 @@ const registerPhysicsSessionEvents = (events: Events) => {
     events.on('physics.setSimulation', (patch: Partial<PhysicsPayload['simulation']>) => {
         simulation = {
             ...simulation,
-            ...patch
+            ...patch,
+            pbmpm: {
+                ...(simulation.pbmpm ?? {}),
+                ...(patch.pbmpm ?? {})
+            }
         };
         emit();
     });
@@ -2674,6 +2877,8 @@ const registerPhysicsSessionEvents = (events: Events) => {
             E: defaults.E,
             nu: defaults.nu,
             mode: defaults.mode,
+            constraintMode: material === 'obstacle' ? 'grid-velocity-cuboid' : undefined,
+            cuboidPaddingGridNodes: material === 'obstacle' ? 2 : undefined,
             fill: material === 'obstacle' ? false : !!options.fill,
             drive: defaultDrive(),
             count: indices.length,
@@ -2716,6 +2921,8 @@ const registerPhysicsSessionEvents = (events: Events) => {
             nu: patch.nu ?? (patch.material ? defaults.nu : object.nu),
             density: patch.density ?? (patch.material ? defaults.density : object.density),
             mode: patch.mode ?? (patch.material ? defaults.mode : object.mode),
+            constraintMode: material === 'obstacle' ? (patch.constraintMode ?? object.constraintMode ?? 'grid-velocity-cuboid') : undefined,
+            cuboidPaddingGridNodes: material === 'obstacle' ? (patch.cuboidPaddingGridNodes ?? object.cuboidPaddingGridNodes ?? 2) : undefined,
             drive: nextDrive
         };
         objects.set(objectId, nextObject);
@@ -2831,14 +3038,14 @@ const registerPhysicsSessionEvents = (events: Events) => {
         const result = await response.json().catch(() => ({}));
         if (result.status === 'completed' && result.result) {
             events.fire('physics.status', `拖拽预览已生成：${result.runId ?? ''}`);
-            await loadMotionFromRun(result);
+            await loadMotionFromRun(result, { includeProxy: true });
             return result;
         }
         if (result.runId) {
             events.fire('physics.status', `拖拽预览任务已提交：${result.runId}`);
-            return pollRun(result.runId);
+            return pollRun(result.runId, { includeProxy: true });
         }
-        await loadMotionFromRun(result);
+        await loadMotionFromRun(result, { includeProxy: true });
         return result;
     });
 

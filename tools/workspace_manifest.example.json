@@ -1,0 +1,33 @@
+{
+  "localRoot": "C:/path/to/ustc26mm-workspace",
+  "repoRoot": "C:/path/to/ustc26mm-workspace/github",
+  "ssh": {
+    "identityFile": "C:/path/to/private_key",
+    "port": 0,
+    "host": "user@example-host"
+  },
+  "cloudRoot": "/path/to/ustc26mm",
+  "files": [
+    {
+      "local": "github/server/phys_backend.py",
+      "cloud": "github/server/phys_backend.py",
+      "kind": "source"
+    },
+    {
+      "local": "github/src-overrides/supersplat-src/src/physics-session.ts",
+      "cloud": "github/src-overrides/supersplat-src/src/physics-session.ts",
+      "kind": "source"
+    },
+    {
+      "local": "github/src-overrides/physgaussian-src/mpm_solver_warp/mpm_solver_warp.py",
+      "cloud": "github/src-overrides/physgaussian-src/mpm_solver_warp/mpm_solver_warp.py",
+      "kind": "source"
+    }
+  ],
+  "cloudHealthUrl": "https://example.com:8443/api/health",
+  "notes": [
+    "Copy this file to tools/workspace_manifest.json and edit it locally.",
+    "Do not commit the real manifest; it may contain private paths and hosts.",
+    "Add project-specific file mappings as needed."
+  ]
+}

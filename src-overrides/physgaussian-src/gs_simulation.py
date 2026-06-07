@@ -298,6 +298,7 @@ if __name__ == "__main__":
                     E=params["E"],
                     nu=params["nu"],
                     density=params["density"],
+                    yield_stress=params.get("yield_stress"),
                     device=device,
                 )
         if labeled_materials and mpm_init_pos.shape[0] > gs_num:
@@ -355,27 +356,9 @@ if __name__ == "__main__":
                     E=params["E"],
                     nu=params["nu"],
                     density=params["density"],
+                    yield_stress=params.get("yield_stress"),
                     device=device,
                 )
-
-    mapped_bc_params = []
-    for bc in bc_params:
-        if bc.get("type") == "fixed_particle_indices":
-            local_indices = [
-                active_lookup[int(original_index)]
-                for original_index in bc.get("indices", [])
-                if int(original_index) in active_lookup
-            ]
-            if not local_indices:
-                continue
-            mapped = dict(bc)
-            mapped["indices"] = local_indices
-            mapped["original_indices_count"] = len(bc.get("indices", []))
-            mapped["local_indices_count"] = len(local_indices)
-            mapped_bc_params.append(mapped)
-        else:
-            mapped_bc_params.append(bc)
-    bc_params = mapped_bc_params
 
     # Note: boundary conditions may depend on mass, so the order cannot be changed!
     set_boundary_conditions(mpm_solver, bc_params, time_params)
@@ -407,13 +390,156 @@ if __name__ == "__main__":
     frame_dt = time_params["frame_dt"]
     frame_num = time_params["frame_num"]
     step_per_frame = max(1, int(round(frame_dt / substep_dt)))
-    integrator = time_params.get("integrator", "explicit")
+    integrator = normalize_integrator_name(time_params.get("integrator", "explicit"))
+    time_params["integrator"] = integrator
+    explicit_params = time_params.get("explicit_mpm", {})
     implicit_params = time_params.get("implicit_mpm", {})
     pbmpm_params = time_params.get("pbmpm", {})
     motion_stream = None
     motion_manifest_path = None
+    motion_frame_index = 0
+    implicit_adaptive_max_split = max(
+        0, int(implicit_params.get("adaptive_max_split", 3))
+    )
+    implicit_adaptive_min_dt_default = max(
+        float(substep_dt) / (2.0 ** max(implicit_adaptive_max_split, 1)),
+        1e-8,
+    )
+    implicit_adaptive_min_dt = float(
+        implicit_params.get("adaptive_min_dt", implicit_adaptive_min_dt_default)
+    )
+    implicit_params.setdefault("adaptive_max_split", implicit_adaptive_max_split)
+    implicit_params.setdefault("adaptive_min_dt", implicit_adaptive_min_dt)
+
+    def write_solver_trace():
+        if args.output_path is None:
+            return
+        if integrator == "implicit" and hasattr(mpm_solver, "implicit_history"):
+            trace_steps = mpm_solver.implicit_history
+        else:
+            trace_steps = getattr(mpm_solver, "solver_history", [])
+        failed_steps = [step for step in trace_steps if step.get("substep_failed")]
+        converged_steps = [step for step in trace_steps if step.get("converged")]
+        final_residuals = [
+            float(step.get("final_residual"))
+            for step in trace_steps
+            if step.get("final_residual") is not None
+        ]
+        final_relative_residuals = [
+            float(step.get("final_relative_residual"))
+            for step in trace_steps
+            if step.get("final_relative_residual") is not None
+        ]
+        final_residual_rms_values = [
+            float(step.get("final_residual_rms"))
+            for step in trace_steps
+            if step.get("final_residual_rms") is not None
+        ]
+        trace_summary = {
+            "step_count": len(trace_steps),
+            "converged_step_count": len(converged_steps),
+            "failed_step_count": len(failed_steps),
+            "committed_step_count": len(
+                [step for step in trace_steps if step.get("committed", True)]
+            ),
+            "total_newton_iters": int(
+                sum(int(step.get("newton_iters", 0)) for step in trace_steps)
+            ),
+            "total_gmres_iters": int(
+                sum(int(step.get("gmres_iters", 0)) for step in trace_steps)
+            ),
+            "total_line_search_evals": int(
+                sum(int(step.get("line_search_evals", 0)) for step in trace_steps)
+            ),
+            "total_fallback_used": int(
+                sum(int(step.get("fallback_used_count", 0)) for step in trace_steps)
+            ),
+            "max_final_residual": max(final_residuals) if final_residuals else None,
+            "max_final_relative_residual": (
+                max(final_relative_residuals) if final_relative_residuals else None
+            ),
+            "max_final_residual_rms": (
+                max(final_residual_rms_values) if final_residual_rms_values else None
+            ),
+            "last_step": trace_steps[-1] if trace_steps else None,
+        }
+        material_trace = {
+        "grid_v_damping_scale": float(
+            material_params.get("grid_v_damping_scale", 1.0)
+        ),
+            "rpic_damping": float(material_params.get("rpic_damping", 0.0)),
+            "material": material_params.get("material"),
+            "E": material_params.get("E"),
+            "nu": material_params.get("nu"),
+            "density": material_params.get("density"),
+            "yield_stress": material_params.get("yield_stress"),
+            "hardening": material_params.get("hardening"),
+            "xi": material_params.get("xi"),
+            "friction_angle": material_params.get("friction_angle"),
+            "plastic_viscosity": material_params.get("plastic_viscosity"),
+            "softening": material_params.get("softening"),
+            "return_mapping": {
+                "explicit_commit": "compute_stress_from_F_trial",
+                "implicit_trial": "evaluate_material_return_mapping",
+                "pbmpm_projection": "none; PBMPM solve_D uses R/Q projection only",
+                "pbmpm_commit": "commit_material_return_mapping when plastic_mode=0; skipped when plastic_mode=1 stretch clamp owns plastic limiting",
+            },
+        }
+        solver_trace = {
+            "format": "physgaussian-solver-trace-v2",
+            "trace_version": 2,
+            "integrator": integrator,
+            "substep_dt": float(substep_dt),
+            "frame_dt": float(frame_dt),
+            "frame_num": int(frame_num),
+            "step_per_frame": int(step_per_frame),
+            "expected_substep_count": int(frame_num * step_per_frame),
+            "gaussian_count": int(gs_num),
+            "original_gaussian_count": int(original_gs_num),
+            "simulated_particle_count": int(mpm_solver.n_particles),
+            "active_original_gaussian_count": int(active_gs_indices.numel()),
+            "material": material_trace,
+            "grid": {
+                "n_grid": int(material_params.get("n_grid", 0)),
+                "grid_lim": float(material_params.get("grid_lim", 0.0)),
+                "dx": float(material_params.get("grid_lim", 0.0))
+                / max(int(material_params.get("n_grid", 1)), 1),
+            },
+            "explicit_mpm": explicit_params if integrator == "explicit" else None,
+            "implicit_mpm": implicit_params if integrator == "implicit" else None,
+            "pbmpm": pbmpm_params if integrator == "pbmpm" else None,
+            "summary": trace_summary,
+            "steps": trace_steps,
+        }
+        trace_path = os.path.join(args.output_path, "solver_trace.json")
+        with open(trace_path, "w", encoding="utf-8") as trace_file:
+            json.dump(solver_trace, trace_file, indent=2)
+        if integrator == "implicit" and hasattr(mpm_solver, "implicit_history"):
+            legacy_trace_path = os.path.join(args.output_path, "implicit_solver_trace.json")
+            with open(legacy_trace_path, "w", encoding="utf-8") as trace_file:
+                json.dump(mpm_solver.implicit_history, trace_file, indent=2)
+
+    def validate_super_motion_frame(pos, quat, scaling, frame_index):
+        max_log_scale = float(torch.max(scaling).detach().cpu())
+        max_position_abs = float(torch.max(torch.abs(pos)).detach().cpu())
+        checks = [
+            (torch.isfinite(pos).all(), "position contains NaN/Inf"),
+            (torch.isfinite(quat).all(), "rotation contains NaN/Inf"),
+            (torch.isfinite(scaling).all(), "scale contains NaN/Inf"),
+            (max_position_abs < 1.0e5, f"position magnitude is too large ({max_position_abs:.6g})"),
+            (max_log_scale < 12.0, f"log-scale is too large ({max_log_scale:.6g})"),
+        ]
+        for ok, message in checks:
+            if bool(ok.detach().cpu()) if hasattr(ok, "detach") else bool(ok):
+                continue
+            write_solver_trace()
+            raise RuntimeError(
+                f"SuperSplat motion export aborted at frame {frame_index}: {message}. "
+                "The solver state is numerically invalid; inspect solver_trace.json."
+            )
 
     def write_super_motion_frame():
+        global motion_frame_index
         pos = mpm_solver.export_particle_x_to_torch()[:gs_num].to(device)
         cov3D = mpm_solver.export_particle_cov_to_torch().view(-1, 6)[:gs_num].to(device)
         pos = apply_inverse_rotations(
@@ -427,6 +553,7 @@ if __name__ == "__main__":
         cov3D = cov3D / (scale_origin * scale_origin)
         cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
         scaling, quat = covariance_to_scaling_rotation(cov3D)
+        validate_super_motion_frame(pos, quat, scaling, motion_frame_index)
         motion_stream.write(
             np.ascontiguousarray(pos.detach().cpu().numpy(), dtype=np.float32).tobytes()
         )
@@ -437,6 +564,83 @@ if __name__ == "__main__":
             np.ascontiguousarray(scaling.detach().cpu().numpy(), dtype=np.float32).tobytes()
         )
         motion_stream.flush()
+        motion_frame_index += 1
+
+    def run_implicit_substep(global_step, requested_dt, depth=0, branch=""):
+        diagnostics = mpm_solver.p2g2p_implicit(
+            global_step,
+            requested_dt,
+            device=device,
+            beta=implicit_params.get("beta", 0.25),
+            gamma=implicit_params.get("gamma", 0.5),
+            newton_tol=implicit_params.get("newton_tol", 5e-4),
+            newton_abs_tol=implicit_params.get("newton_abs_tol", 1e-6),
+            newton_rms_tol=implicit_params.get("newton_rms_tol", 1e-4),
+            newton_max_iter=implicit_params.get("newton_max_iter", 16),
+            gmres_tol=implicit_params.get(
+                "gmres_tol", implicit_params.get("gmres_tol_floor", 1e-3)
+            ),
+            gmres_tol_floor=implicit_params.get("gmres_tol_floor", 1e-3),
+            gmres_max_iter=implicit_params.get("gmres_max_iter", 24),
+            jvp_eps=implicit_params.get("jvp_eps", 1e-4),
+            line_search_max_iter=implicit_params.get("line_search_max_iter", 8),
+            armijo_c1=implicit_params.get("armijo_c1", 1e-4),
+            ew_eta_min=implicit_params.get("ew_eta_min", 1e-3),
+            ew_eta_max=implicit_params.get("ew_eta_max", 0.1),
+            ew_gamma=implicit_params.get("ew_gamma", 0.9),
+            ew_alpha=implicit_params.get("ew_alpha", 1.5),
+            stiffness_preconditioner_scale=implicit_params.get(
+                "stiffness_preconditioner_scale", 1.0
+            ),
+            stagnation_tol=implicit_params.get("stagnation_tol", 1e-8),
+            nonlinear_failure_relative=implicit_params.get(
+                "nonlinear_failure_relative", 5e-2
+            ),
+            nonlinear_failure_absolute=implicit_params.get(
+                "nonlinear_failure_absolute", 1.0
+            ),
+            allow_best_effort_commit=implicit_params.get(
+                "allow_best_effort_commit", False
+            ),
+            near_converged_factor=implicit_params.get(
+                "near_converged_factor", 2.0
+            ),
+            near_newton_rms_tol=implicit_params.get("near_newton_rms_tol", 1e-4),
+            fallback_descent_tol=implicit_params.get("fallback_descent_tol", 1e-8),
+            fallback_step_min_rel=implicit_params.get("fallback_step_min_rel", 1e-8),
+            fallback_decrease_tol=implicit_params.get(
+                "fallback_decrease_tol", 1e-6
+            ),
+        )
+        diagnostics["adaptive_depth"] = int(depth)
+        diagnostics["adaptive_branch"] = branch
+        diagnostics["requested_dt"] = float(requested_dt)
+        if not diagnostics.get("substep_failed"):
+            return
+
+        can_split = (
+            not diagnostics.get("committed", True)
+            and depth < implicit_adaptive_max_split
+            and requested_dt * 0.5 >= implicit_adaptive_min_dt
+        )
+        if can_split:
+            child_dt = requested_dt * 0.5
+            diagnostics["adaptive_retry"] = "split"
+            diagnostics["adaptive_child_dt"] = float(child_dt)
+            run_implicit_substep(global_step, child_dt, depth + 1, branch + "0")
+            run_implicit_substep(global_step, child_dt, depth + 1, branch + "1")
+            return
+
+        diagnostics["adaptive_retry"] = "exhausted"
+        write_solver_trace()
+        raise RuntimeError(
+            "Implicit MPM substep failed before commit: "
+            f"step={global_step}, dt={requested_dt:.6g}, "
+            f"reason={diagnostics.get('failure_reason')}, "
+            f"relative_residual={diagnostics.get('final_relative_residual')}, "
+            f"residual={diagnostics.get('final_residual')}. "
+            "Inspect solver_trace.json for Newton/GMRES details."
+        )
 
     if args.output_super_motion:
         assert args.output_path is not None
@@ -504,52 +708,36 @@ if __name__ == "__main__":
 
         for step in range(step_per_frame):
             global_step = frame * step_per_frame + step
-            if integrator == "implicit":
-                mpm_solver.p2g2p_implicit(
-                    global_step,
-                    substep_dt,
-                    device=device,
-                    beta=implicit_params.get("beta", 0.25),
-                    gamma=implicit_params.get("gamma", 0.5),
-                    newton_tol=implicit_params.get("newton_tol", 1e-4),
-                    newton_abs_tol=implicit_params.get("newton_abs_tol", 1e-6),
-                    newton_max_iter=implicit_params.get("newton_max_iter", 8),
-                    gmres_tol=implicit_params.get("gmres_tol", 1e-3),
-                    gmres_max_iter=implicit_params.get("gmres_max_iter", 24),
-                    jvp_eps=implicit_params.get("jvp_eps", 1e-4),
-                    line_search_max_iter=implicit_params.get(
-                        "line_search_max_iter", 8
-                    ),
-                    armijo_c1=implicit_params.get("armijo_c1", 1e-4),
-                    ew_eta_min=implicit_params.get("ew_eta_min", 1e-5),
-                    ew_eta_max=implicit_params.get("ew_eta_max", 0.5),
-                    ew_gamma=implicit_params.get("ew_gamma", 0.9),
-                    ew_alpha=implicit_params.get("ew_alpha", 1.5),
-                    stiffness_preconditioner_scale=implicit_params.get(
-                        "stiffness_preconditioner_scale", 1.0
-                    ),
-                    stagnation_tol=implicit_params.get("stagnation_tol", 1e-8),
-                )
-            elif integrator == "pbmpm":
-                mpm_solver.p2g2p_pbmpm(
-                    global_step,
-                    substep_dt,
-                    device=device,
-                    elasticity_ratio=pbmpm_params.get(
-                        "elasticity_ratio", pbmpm_params.get("r_scale", 1.0)
-                    ),
-                    elastic_relaxation=pbmpm_params.get(
-                        "elastic_relaxation", pbmpm_params.get("s_scale", 1.5)
-                    ),
-                    plasticity=pbmpm_params.get("plasticity", 0.0),
-                    yield_min=pbmpm_params.get("yield_min", 0.55),
-                    yield_max=pbmpm_params.get("yield_max", 1.85),
-                    iteration_count=pbmpm_params.get(
-                        "iteration_count", pbmpm_params.get("projection_iterations", 1)
-                    ),
-                )
-            else:
-                mpm_solver.p2g2p(global_step, substep_dt, device=device)
+            try:
+                if integrator == "implicit":
+                    run_implicit_substep(global_step, substep_dt)
+                elif integrator == "pbmpm":
+                    mpm_solver.p2g2p_pbmpm(
+                        global_step,
+                        substep_dt,
+                        device=device,
+                        strength_scale=pbmpm_params.get(
+                            "strength_scale", pbmpm_params.get("stiffness_scale", 1.0)
+                        ),
+                        n_min=pbmpm_params.get(
+                            "n_min", pbmpm_params.get("N_min", pbmpm_params.get("nMin", 3))
+                        ),
+                        n_max=pbmpm_params.get(
+                            "n_max", pbmpm_params.get("N_max", pbmpm_params.get("nMax", 25))
+                        ),
+                        plastic_mode=pbmpm_params.get("plastic_mode", 0),
+                        yield_min=pbmpm_params.get("yield_min", 0.55),
+                        yield_max=pbmpm_params.get("yield_max", 1.85),
+                    )
+                elif integrator == "explicit":
+                    mpm_solver.p2g2p(global_step, substep_dt, device=device)
+                else:
+                    raise ValueError(f"Unknown integrator '{integrator}'")
+            except Exception:
+                write_solver_trace()
+                if motion_stream is not None:
+                    motion_stream.flush()
+                raise
 
         if args.output_ply or args.output_h5:
             save_data_at_frame(
@@ -614,33 +802,7 @@ if __name__ == "__main__":
             f"ffmpeg -framerate {fps} -i {args.output_path}/%04d.png -c:v libx264 -s {width}x{height} -y -pix_fmt yuv420p {args.output_path}/output.mp4"
         )
 
-    if args.output_path is not None:
-        if integrator == "implicit" and hasattr(mpm_solver, "implicit_history"):
-            trace_steps = mpm_solver.implicit_history
-        else:
-            trace_steps = getattr(mpm_solver, "solver_history", [])
-        solver_trace = {
-            "format": "physgaussian-solver-trace-v1",
-            "integrator": integrator,
-            "substep_dt": float(substep_dt),
-            "frame_dt": float(frame_dt),
-            "frame_num": int(frame_num),
-            "step_per_frame": int(step_per_frame),
-            "gaussian_count": int(gs_num),
-            "original_gaussian_count": int(original_gs_num),
-            "simulated_particle_count": int(mpm_solver.n_particles),
-            "active_original_gaussian_count": int(active_gs_indices.numel()),
-            "implicit_mpm": implicit_params if integrator == "implicit" else None,
-            "pbmpm": pbmpm_params if integrator == "pbmpm" else None,
-            "steps": trace_steps,
-        }
-        trace_path = os.path.join(args.output_path, "solver_trace.json")
-        with open(trace_path, "w", encoding="utf-8") as trace_file:
-            json.dump(solver_trace, trace_file, indent=2)
-        if integrator == "implicit" and hasattr(mpm_solver, "implicit_history"):
-            legacy_trace_path = os.path.join(args.output_path, "implicit_solver_trace.json")
-            with open(legacy_trace_path, "w", encoding="utf-8") as trace_file:
-                json.dump(mpm_solver.implicit_history, trace_file, indent=2)
+    write_solver_trace()
 
     if motion_stream is not None:
         motion_stream.close()

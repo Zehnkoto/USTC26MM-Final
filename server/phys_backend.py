@@ -79,11 +79,41 @@ app.mount("/outputs", StaticFiles(directory=RUNS_ROOT), name="outputs")
 
 MATERIAL_DEFAULTS: dict[str, dict[str, Any]] = {
     "jelly": {"material": "jelly", "E": 1e5, "nu": 0.3, "density": 200},
-    "metal": {"material": "metal", "E": 2e6, "nu": 0.3, "density": 2700},
-    "sand": {"material": "sand", "E": 1e5, "nu": 0.2, "density": 1500},
-    "foam": {"material": "foam", "E": 1e4, "nu": 0.1, "density": 80},
+    "metal": {
+        "material": "metal",
+        "E": 2e6,
+        "nu": 0.3,
+        "density": 2700,
+        "yield_stress": 1e2,
+        "hardening": 0.0,
+        "xi": 0.0,
+    },
+    "sand": {
+        "material": "sand",
+        "E": 1e5,
+        "nu": 0.2,
+        "density": 1500,
+        "friction_angle": 30.0,
+    },
+    "foam": {
+        "material": "foam",
+        "E": 1e4,
+        "nu": 0.1,
+        "density": 80,
+        "yield_stress": 1e2,
+        "plastic_viscosity": 0.0,
+    },
     "snow": {"material": "snow", "E": 1.4e5, "nu": 0.2, "density": 400},
-    "plasticine": {"material": "plasticine", "E": 4e4, "nu": 0.35, "density": 1300},
+    "plasticine": {
+        "material": "plasticine",
+        "E": 4e4,
+        "nu": 0.35,
+        "density": 1300,
+        "yield_stress": 1e2,
+        "softening": 0.1,
+        "hardening": 0.0,
+        "xi": 0.0,
+    },
     # Stock PhysGaussian has no rigid material law. In v1 rigid means a very
     # stiff jelly-like elastoplastic object; true finite-mass rigid bodies are a
     # later solver extension.
@@ -92,6 +122,15 @@ MATERIAL_DEFAULTS: dict[str, dict[str, Any]] = {
     # particles, not a collider material.
     "obstacle": {"material": "jelly", "E": 2e6, "nu": 0.4, "density": 200},
 }
+
+MATERIAL_PARAM_KEYS = (
+    "yield_stress",
+    "hardening",
+    "xi",
+    "friction_angle",
+    "plastic_viscosity",
+    "softening",
+)
 
 OFFICIAL_CONFIG_BY_MODEL_FOLDER = {
     "bread-trained": "tear_bread_config.json",
@@ -312,6 +351,91 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
+def _normalize_integrator_name(value: Any) -> str:
+    name = str(value or "explicit").strip().lower().replace("-", "_")
+    if name in ("implicit", "implicit_mpm"):
+        return "implicit"
+    if name in ("explicit", "explicit_mpm", "mpm"):
+        return "explicit"
+    if name in ("pbmpm", "pb_mpm"):
+        return "pbmpm"
+    raise ValueError(f"Unknown integrator '{value}'")
+
+
+def _solver_to_integrator(solver: Any) -> str:
+    return _normalize_integrator_name(str(solver or "explicit-mpm"))
+
+
+def _pbmpm_config_from_simulation(simulation: dict[str, Any]) -> dict[str, Any]:
+    pbmpm_sim = simulation.get("pbmpm") if isinstance(simulation.get("pbmpm"), dict) else {}
+    config: dict[str, Any] = {}
+
+    strength_raw = _first_present(
+        pbmpm_sim.get("strength_scale"),
+        pbmpm_sim.get("stiffness_scale"),
+        simulation.get("pbmpmStrengthScale"),
+        simulation.get("pbmpmStiffnessScale"),
+    )
+    if strength_raw is not None:
+        strength_value = max(_safe_float(strength_raw, 1.0), 1e-6)
+        if abs(strength_value - 1.0) > 1e-12:
+            config["strength_scale"] = strength_value
+
+    n_min_raw = _first_present(
+        pbmpm_sim.get("n_min"),
+        pbmpm_sim.get("N_min"),
+        pbmpm_sim.get("nMin"),
+        simulation.get("pbmpmNMin"),
+    )
+    n_max_raw = _first_present(
+        pbmpm_sim.get("n_max"),
+        pbmpm_sim.get("N_max"),
+        pbmpm_sim.get("nMax"),
+        simulation.get("pbmpmNMax"),
+    )
+    n_min = max(1, _safe_int(n_min_raw, 3))
+    n_max = max(n_min, _safe_int(n_max_raw, 25))
+    config["n_min"] = n_min
+    config["n_max"] = n_max
+
+    plastic_mode_raw = _first_present(
+        pbmpm_sim.get("plastic_mode"),
+        simulation.get("pbmpmPlasticMode"),
+    )
+    config["plastic_mode"] = 1 if _safe_int(plastic_mode_raw, 0) == 1 else 0
+
+    yield_min = _safe_float(
+        _first_present(pbmpm_sim.get("yield_min"), simulation.get("pbmpmYieldMin")),
+        0.55,
+    )
+    yield_max = _safe_float(
+        _first_present(pbmpm_sim.get("yield_max"), simulation.get("pbmpmYieldMax")),
+        1.85,
+    )
+    config["yield_min"] = yield_min
+    config["yield_max"] = max(yield_min + 1e-4, yield_max)
+
+    return config
+
+
+def _simulation_damping(simulation: dict[str, Any], fallback: float = 1.0) -> float:
+    raw = _first_present(
+        simulation.get("damping"),
+        simulation.get("gridDamping"),
+        simulation.get("grid_v_damping_scale"),
+    )
+    return max(0.0, min(_safe_float(raw, fallback), 1.0))
+
+
+def _config_damping(config: dict[str, Any], fallback: float = 0.9999) -> float:
+    raw = _first_present(
+        config.get("grid_v_damping_scale"),
+        config.get("damping"),
+        fallback,
+    )
+    return max(0.0, min(_safe_float(raw, fallback), 1.0))
+
+
 def _safe_vec3(value: Any, fallback: list[float] | None = None) -> list[float]:
     base = fallback if fallback is not None else [0.0, 0.0, 0.0]
     if isinstance(value, (int, float)):
@@ -466,6 +590,7 @@ def _match_official_config_for_ply(ply_path: Path) -> Path | None:
 def _official_config_values(path: Path) -> dict[str, Any]:
     config = _read_json(path)
     gravity = _safe_vec3(config.get("g"), [0.0, 0.0, 0.0])
+    damping = _config_damping(config)
     return {
         "name": path.name,
         "preprocessing": {
@@ -474,7 +599,7 @@ def _official_config_values(path: Path) -> dict[str, Any]:
             "rotation_axis": config.get("rotation_axis", [0]),
             "sim_area": config.get("sim_area"),
             "scale": config.get("scale", 1.0),
-            "n_grid": config.get("n_grid", 100),
+            "n_grid": config.get("n_grid", 50),
         },
         "simulation": {
             "gravityEnabled": any(abs(value) > 1e-12 for value in gravity),
@@ -482,14 +607,20 @@ def _official_config_values(path: Path) -> dict[str, Any]:
             "frame_dt": config.get("frame_dt", 2e-2),
             "frame_num": DEFAULT_FRAME_NUM,
             "substep_dt": config.get("substep_dt", 1e-4),
-            "grid_v_damping_scale": config.get("grid_v_damping_scale"),
-            "rpic_damping": config.get("rpic_damping"),
+            "damping": damping,
+            "grid_v_damping_scale": damping,
+            "rpic_damping": _safe_float(config.get("rpic_damping"), 0.0),
         },
         "material": {
             "material": config.get("material", "jelly"),
             "E": config.get("E"),
             "nu": config.get("nu"),
             "density": config.get("density"),
+            **{
+                key: config.get(key)
+                for key in MATERIAL_PARAM_KEYS
+                if key in config
+            },
             "additional_material_params": config.get("additional_material_params", []),
         },
         "boundary_conditions": config.get("boundary_conditions", []),
@@ -676,6 +807,107 @@ def _aabb_to_mpm_box(aabb: dict[str, Any], sim_area: list[float], scale: float) 
     return {"point": point, "size": size}
 
 
+def _grid_node_stats(bounds: dict[str, list[float]], n_grid: int, grid_lim: float) -> dict[str, Any]:
+    dx = grid_lim / max(n_grid, 1)
+    counts: list[int] = []
+    index_min: list[int] = []
+    index_max: list[int] = []
+    for axis in range(3):
+        first = -1
+        last = -1
+        count = 0
+        for index in range(max(n_grid, 0)):
+            coord = index * dx
+            if bounds["min"][axis] < coord < bounds["max"][axis]:
+                if first < 0:
+                    first = index
+                last = index
+                count += 1
+        counts.append(count)
+        index_min.append(0 if first < 0 else first)
+        index_max.append(last)
+    return {
+        "gridDx": dx,
+        "estimatedGridNodeCounts": counts,
+        "estimatedGridNodeCount": counts[0] * counts[1] * counts[2],
+        "gridIndexBounds": {"min": index_min, "max": index_max},
+    }
+
+
+def _aabb_to_velocity_cuboid_constraint(
+    obj: dict[str, Any],
+    sim_area: list[float],
+    scale: float,
+    n_grid: int,
+    substep_dt: float,
+    grid_lim: float = 2.0,
+) -> dict[str, Any] | None:
+    aabb = obj.get("aabbWorld") or {}
+    lo = aabb.get("min")
+    hi = aabb.get("max")
+    if not (isinstance(lo, list) and isinstance(hi, list) and len(lo) == 3 and len(hi) == 3):
+        return None
+
+    sim_min = [sim_area[0], sim_area[2], sim_area[4]]
+    sim_max = [sim_area[1], sim_area[3], sim_area[5]]
+    center = [(sim_min[i] + sim_max[i]) * 0.5 for i in range(3)]
+    max_diff = max(sim_max[i] - sim_min[i] for i in range(3))
+    if max_diff <= 1e-12:
+        return None
+
+    factor = scale / max_diff
+    obj_min = [_safe_float(lo[i], 0.0) for i in range(3)]
+    obj_max = [_safe_float(hi[i], 0.0) for i in range(3)]
+    mpm_min = [(min(obj_min[i], obj_max[i]) - center[i]) * factor + 1.0 for i in range(3)]
+    mpm_max = [(max(obj_min[i], obj_max[i]) - center[i]) * factor + 1.0 for i in range(3)]
+
+    padding_grid_nodes = max(0, _safe_int(obj.get("cuboidPaddingGridNodes"), 2))
+    dx = grid_lim / max(n_grid, 1)
+    padding = padding_grid_nodes * dx
+    padded_min = [mpm_min[i] - padding for i in range(3)]
+    padded_max = [mpm_max[i] + padding for i in range(3)]
+    for axis in range(3):
+        cuboid_center = (padded_min[axis] + padded_max[axis]) * 0.5
+        min_half = max(dx * padding_grid_nodes, dx * 1.01)
+        if (padded_max[axis] - padded_min[axis]) * 0.5 < min_half:
+            padded_min[axis] = cuboid_center - min_half
+            padded_max[axis] = cuboid_center + min_half
+
+    padded_bounds = {"min": padded_min, "max": padded_max}
+    stats = _grid_node_stats(padded_bounds, n_grid, grid_lim)
+    drive = _drive_params(obj)
+    velocity_source = drive["prescribedVelocity"]
+    has_linear_drive = drive["linearEnabled"] and any(abs(_safe_float(value, 0.0)) > 1e-12 for value in velocity_source)
+    start_time = drive["linearStart"] if has_linear_drive else 0
+    end_time = start_time + max(1, drive["linearNumDt"]) * substep_dt if has_linear_drive else 1e3
+    velocity = velocity_source if has_linear_drive else [0, 0, 0]
+    point = [(padded_min[i] + padded_max[i]) * 0.5 for i in range(3)]
+    size = [max((padded_max[i] - padded_min[i]) * 0.5, dx * 1.01) for i in range(3)]
+
+    return {
+        "type": "cuboid",
+        "constraint_type": "set_velocity_on_cuboid",
+        "point": point,
+        "size": size,
+        "scale": [2.0 * value for value in size],
+        "velocity": velocity,
+        "start_time": start_time,
+        "end_time": end_time,
+        "reset": 1,
+        "_ui_role": "grid_velocity_cuboid_anchor",
+        "_ui_body_id": _body_id(obj),
+        "_ui_object_id": obj.get("objectId"),
+        "_ui_coordinate_space": "mpm_shifted_normalized",
+        "_ui_scene_bounds": {"min": obj_min, "max": obj_max},
+        "_ui_sim_area": sim_area[:],
+        "_ui_mpm_bounds": {"min": mpm_min, "max": mpm_max},
+        "_ui_padded_mpm_bounds": padded_bounds,
+        "_ui_padding": padding,
+        "_ui_padding_grid_nodes": padding_grid_nodes,
+        **stats,
+    }
+
+
 def _body_id(obj: dict[str, Any]) -> int:
     return _safe_int(obj.get("bodyId"), _safe_int(obj.get("objectId"), 0))
 
@@ -727,13 +959,22 @@ def _objects_by_body(objects: list[dict[str, Any]]) -> dict[int, list[dict[str, 
 
 
 def _object_params(obj: dict[str, Any]) -> dict[str, Any]:
-    defaults = MATERIAL_DEFAULTS.get(str(obj.get("material", "jelly")), MATERIAL_DEFAULTS["jelly"])
-    return {
+    material_value = obj.get("material", "jelly")
+    material_config = material_value if isinstance(material_value, dict) else {}
+    material_name = material_config.get("material", "jelly") if material_config else material_value
+    defaults = MATERIAL_DEFAULTS.get(str(material_name).lower(), MATERIAL_DEFAULTS["jelly"])
+    source = {**material_config, **obj}
+    params = {
         "material": defaults["material"],
-        "E": _safe_float(obj.get("E"), defaults["E"]),
-        "nu": _safe_float(obj.get("nu"), defaults["nu"]),
-        "density": _safe_float(obj.get("density"), defaults["density"]),
+        "E": _safe_float(source.get("E"), defaults["E"]),
+        "nu": _safe_float(source.get("nu"), defaults["nu"]),
+        "density": _safe_float(source.get("density"), defaults["density"]),
     }
+    for key in MATERIAL_PARAM_KEYS:
+        value = source.get(key, defaults.get(key))
+        if value is not None:
+            params[key] = _safe_float(value, _safe_float(defaults.get(key), 0.0))
+    return params
 
 
 def _aabb_center(obj: dict[str, Any]) -> list[float] | None:
@@ -767,9 +1008,19 @@ def _params_for_fixed_part(part: dict[str, Any], body_parts: list[dict[str, Any]
 
 def _drive_params(obj: dict[str, Any]) -> dict[str, Any]:
     drive = obj.get("drive") or {}
+    linear_force = drive.get("linearForce") if isinstance(drive.get("linearForce"), list) else [0, 0, 0]
+    linear_velocity = drive.get("linearVelocity") if isinstance(drive.get("linearVelocity"), list) else None
+    target_velocity = drive.get("targetVelocity") if isinstance(drive.get("targetVelocity"), list) else None
+    dirichlet_velocity = drive.get("dirichletVelocity") if isinstance(drive.get("dirichletVelocity"), list) else None
+    prescribed_velocity = _first_present(dirichlet_velocity, target_velocity, linear_velocity)
     return {
         "linearEnabled": bool(drive.get("linearEnabled")),
-        "linearForce": drive.get("linearForce") if isinstance(drive.get("linearForce"), list) else [0, 0, 0],
+        "linearForce": linear_force,
+        "linearVelocity": linear_velocity or [0, 0, 0],
+        "targetVelocity": target_velocity or [0, 0, 0],
+        "dirichletVelocity": dirichlet_velocity or [0, 0, 0],
+        "prescribedVelocity": prescribed_velocity or linear_force,
+        "hasExplicitVelocity": prescribed_velocity is not None,
         "linearNumDt": _safe_int(drive.get("linearNumDt"), 1),
         "linearStart": _safe_float(drive.get("linearStart"), 0),
         "spinEnabled": bool(drive.get("spinEnabled")),
@@ -1231,7 +1482,7 @@ def _proxy_mpm_step(
     drive_velocity: list[float] | None = None,
     kinematic_groups: set[int] | None = None,
     kinematic_drive_groups: set[int] | None = None,
-    damping: float = 0.995,
+    damping: float = 1.0,
     stress_scale: float = 0.35,
 ) -> tuple[list[list[float]], list[list[float]], list[list[list[float]]], list[list[list[float]]], list[list[float]]]:
     if not centers:
@@ -1543,6 +1794,7 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
     preprocessing = payload.get("preprocessing") or {}
     simulation = payload.get("simulation") or {}
     solver = str(payload.get("solver") or "explicit-mpm")
+    integrator = _solver_to_integrator(solver)
     objects = payload.get("objects") or []
     active_objects = _active_objects(objects)
     fixed_anchor_objects = [obj for obj in active_objects if _is_obstacle_part(obj)]
@@ -1555,7 +1807,7 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
     active_aabb = _union_aabb(active_objects) if active_objects else None
     sim_area = [active_aabb["min"][0], active_aabb["max"][0], active_aabb["min"][1], active_aabb["max"][1], active_aabb["min"][2], active_aabb["max"][2]] if active_aabb else _sim_area_from_payload(payload)
     scale = _safe_float(preprocessing.get("scale"), 1.0)
-    n_grid = _safe_int(preprocessing.get("n_grid"), 100)
+    n_grid = _safe_int(preprocessing.get("n_grid"), 50)
 
     config: dict[str, Any] = {
         "opacity_threshold": _safe_float(preprocessing.get("opacity_threshold"), 0.02),
@@ -1564,14 +1816,14 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
         "substep_dt": _safe_float(simulation.get("substep_dt"), 1e-4),
         "frame_dt": _safe_float(simulation.get("frame_dt"), 2e-2),
         "frame_num": _safe_int(simulation.get("frame_num"), DEFAULT_FRAME_NUM),
-        "integrator": "implicit" if solver == "implicit-mpm" else "pbmpm" if solver == "pbmpm" else "explicit",
+        "integrator": integrator,
         "E": base_params["E"],
         "nu": base_params["nu"],
         "n_grid": n_grid,
         "material": base_params["material"],
         "density": base_params["density"],
         "g": _simulation_gravity(simulation),
-        "grid_v_damping_scale": 0.9999,
+        "grid_v_damping_scale": _simulation_damping(simulation),
         "rpic_damping": 0.0,
         "scale": scale,
         "mpm_space_vertical_upward_axis": [0, 0, 1],
@@ -1580,73 +1832,78 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
         "show_hint": False,
         "move_camera": False,
     }
-    if solver == "implicit-mpm":
+    for key in MATERIAL_PARAM_KEYS:
+        if key in base_params:
+            config[key] = base_params[key]
+
+    if integrator == "implicit":
         config["implicit_mpm"] = {
             "beta": _safe_float(simulation.get("implicitBeta"), 0.25),
             "gamma": _safe_float(simulation.get("implicitGamma"), 0.5),
-            "newton_tol": _safe_float(simulation.get("newtonTol"), 1e-4),
+            "newton_tol": _safe_float(simulation.get("newtonTol"), 5e-4),
             "newton_abs_tol": _safe_float(simulation.get("newtonAbsTol"), 1e-6),
-            "newton_max_iter": _safe_int(simulation.get("newtonMaxIter"), 8),
+            "newton_rms_tol": _safe_float(
+                _first_present(
+                    simulation.get("newtonRmsTol"),
+                    simulation.get("newton_rms_tol"),
+                ),
+                1e-4,
+            ),
+            "newton_max_iter": _safe_int(simulation.get("newtonMaxIter"), 16),
             "gmres_tol": _safe_float(simulation.get("gmresTol"), 1e-3),
+            "gmres_tol_floor": _safe_float(
+                simulation.get("gmresTolFloor"),
+                1e-3,
+            ),
             "gmres_max_iter": _safe_int(simulation.get("gmresMaxIter"), 24),
             "jvp_eps": _safe_float(simulation.get("jvpEps"), 1e-4),
             "line_search_max_iter": _safe_int(simulation.get("lineSearchMaxIter"), 8),
             "armijo_c1": _safe_float(simulation.get("armijoC1"), 1e-4),
-            "ew_eta_min": _safe_float(simulation.get("ewEtaMin"), 1e-5),
-            "ew_eta_max": _safe_float(simulation.get("ewEtaMax"), 0.5),
+            "ew_eta_min": _safe_float(simulation.get("ewEtaMin"), 1e-3),
+            "ew_eta_max": _safe_float(simulation.get("ewEtaMax"), 0.1),
             "ew_gamma": _safe_float(simulation.get("ewGamma"), 0.9),
             "ew_alpha": _safe_float(simulation.get("ewAlpha"), 1.5),
             "stiffness_preconditioner_scale": _safe_float(
                 simulation.get("stiffnessPreconditionerScale"), 1.0
             ),
             "stagnation_tol": _safe_float(simulation.get("stagnationTol"), 1e-8),
-        }
-    if solver == "pbmpm":
-        pbmpm_sim = simulation.get("pbmpm") if isinstance(simulation.get("pbmpm"), dict) else {}
-        config["pbmpm"] = {
-            "iteration_count": _safe_int(
+            "allow_best_effort_commit": bool(
+                simulation.get("allowBestEffortCommit", False)
+            ),
+            "near_converged_factor": _safe_float(
+                simulation.get("nearConvergedFactor"), 2.0
+            ),
+            "near_newton_rms_tol": _safe_float(
                 _first_present(
-                    pbmpm_sim.get("iteration_count"),
-                    pbmpm_sim.get("projection_iterations"),
-                    simulation.get("iteration_count"),
-                    simulation.get("pbmpmIterationCount"),
-                    simulation.get("pbmpmIterations"),
+                    simulation.get("nearNewtonRmsTol"),
+                    simulation.get("near_newton_rms_tol"),
                 ),
-                1,
+                1e-4,
             ),
-            "elasticity_ratio": _safe_float(
+            "fallback_descent_tol": _safe_float(
                 _first_present(
-                    pbmpm_sim.get("elasticity_ratio"),
-                    pbmpm_sim.get("r_scale"),
-                    simulation.get("elasticity_ratio"),
-                    simulation.get("pbmpmElasticityRatio"),
-                    simulation.get("pbmpmRScale"),
+                    simulation.get("fallbackDescentTol"),
+                    simulation.get("fallback_descent_tol"),
                 ),
-                1.0,
+                1e-8,
             ),
-            "elastic_relaxation": _safe_float(
+            "fallback_step_min_rel": _safe_float(
                 _first_present(
-                    pbmpm_sim.get("elastic_relaxation"),
-                    pbmpm_sim.get("s_scale"),
-                    simulation.get("elastic_relaxation"),
-                    simulation.get("pbmpmElasticRelaxation"),
-                    simulation.get("pbmpmSScale"),
+                    simulation.get("fallbackStepMinRel"),
+                    simulation.get("fallback_step_min_rel"),
                 ),
-                1.5,
+                1e-8,
             ),
-            "plasticity": _safe_float(
-                _first_present(pbmpm_sim.get("plasticity"), simulation.get("pbmpmPlasticity")),
-                0.0,
-            ),
-            "yield_min": _safe_float(
-                _first_present(pbmpm_sim.get("yield_min"), simulation.get("pbmpmYieldMin")),
-                0.55,
-            ),
-            "yield_max": _safe_float(
-                _first_present(pbmpm_sim.get("yield_max"), simulation.get("pbmpmYieldMax")),
-                1.85,
+            "fallback_decrease_tol": _safe_float(
+                _first_present(
+                    simulation.get("fallbackDecreaseTol"),
+                    simulation.get("fallback_decrease_tol"),
+                ),
+                1e-6,
             ),
         }
+    if integrator == "pbmpm":
+        config["pbmpm"] = _pbmpm_config_from_simulation(simulation)
 
     if sim_area is not None:
         config["sim_area"] = sim_area
@@ -1668,14 +1925,15 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
             if previous is not None and previous != _safe_int(obj.get("objectId"), -1):
                 material_conflicts.append({"index": index, "previousObjectId": previous, "objectId": obj.get("objectId")})
             material_index_owner[index] = _safe_int(obj.get("objectId"), -1)
-        particle_material.append(
-            {
-                "indices": clean_indices,
-                "E": params["E"],
-                "nu": params["nu"],
-                "density": params["density"],
-            }
-        )
+        entry = {
+            "indices": clean_indices,
+            "E": params["E"],
+            "nu": params["nu"],
+            "density": params["density"],
+        }
+        if "yield_stress" in params:
+            entry["yield_stress"] = params["yield_stress"]
+        particle_material.append(entry)
     if particle_material:
         config["particle_material_params"] = particle_material
 
@@ -1687,14 +1945,15 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             body_parts = bodies.get(_body_id(obj), material_objects)
             params = _params_for_fixed_part(obj, body_parts) if _is_obstacle_part(obj) else _object_params(obj)
-            additional.append(
-                {
-                    **box,
-                    "E": params["E"],
-                    "nu": params["nu"],
-                    "density": params["density"],
-                }
-            )
+            entry = {
+                **box,
+                "E": params["E"],
+                "nu": params["nu"],
+                "density": params["density"],
+            }
+            if "yield_stress" in params:
+                entry["yield_stress"] = params["yield_stress"]
+            additional.append(entry)
     if additional:
         config["additional_material_params"] = additional
 
@@ -1744,29 +2003,26 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     fixed_anchor_count = 0
+    grid_velocity_cuboid_constraints: list[dict[str, Any]] = []
     for part in fixed_anchor_objects:
         clean_indices = sorted({_safe_int(value, -1) for value in part.get("indices") or [] if _safe_int(value, -1) >= 0})
-        if not clean_indices:
-            continue
-        drive = _drive_params(part)
-        has_linear_drive = drive["linearEnabled"] and any(abs(_safe_float(value, 0.0)) > 1e-12 for value in drive["linearForce"])
-        drive_start = drive["linearStart"] if has_linear_drive else 0
-        drive_end = drive_start + max(1, drive["linearNumDt"]) * config["substep_dt"] if has_linear_drive else 1e3
         fixed_anchor_count += len(clean_indices)
-        boundary_conditions.append(
-            {
-                "type": "fixed_particle_indices",
-                "indices": clean_indices,
-                "velocity": drive["linearForce"] if has_linear_drive else [0, 0, 0],
-                "start_time": drive_start,
-                "end_time": drive_end,
-                "reset_deformation": 1,
-                "_ui_role": "fixed_anchor_part",
-                "_ui_body_id": _body_id(part),
-                "_ui_object_id": part.get("objectId"),
-                "_ui_kinematic_drive": has_linear_drive,
-            }
-        )
+        cuboid = _aabb_to_velocity_cuboid_constraint(
+            part,
+            sim_area,
+            scale,
+            n_grid,
+            config["substep_dt"],
+            _safe_float(config.get("grid_lim"), 2.0),
+        ) if sim_area is not None else None
+        if cuboid:
+            boundary_conditions.append(cuboid)
+            grid_velocity_cuboid_constraints.append(cuboid)
+        else:
+            _log(
+                f"skip grid velocity cuboid for fixed anchor object={part.get('objectId')} "
+                "because its AABB or sim_area is invalid"
+            )
 
     if sim_area is not None:
         for body_parts in bodies.values():
@@ -1811,6 +2067,29 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
         "materialPartCount": len(material_objects),
         "fixedAnchorPartCount": len(fixed_anchor_objects),
         "fixedAnchorGaussianCount": fixed_anchor_count,
+        "fixedAnchorMode": "grid_velocity_cuboid",
+        "gridVelocityCuboidCount": len(grid_velocity_cuboid_constraints),
+        "gridVelocityCuboids": [
+            {
+                "objectId": bc.get("_ui_object_id"),
+                "bodyId": bc.get("_ui_body_id"),
+                "sceneBounds": bc.get("_ui_scene_bounds"),
+                "simArea": bc.get("_ui_sim_area"),
+                "mpmBounds": bc.get("_ui_mpm_bounds"),
+                "paddedMpmBounds": bc.get("_ui_padded_mpm_bounds"),
+                "point": bc.get("point"),
+                "size": bc.get("size"),
+                "velocity": bc.get("velocity"),
+                "padding": bc.get("_ui_padding"),
+                "paddingGridNodes": bc.get("_ui_padding_grid_nodes"),
+                "gridDx": bc.get("gridDx"),
+                "estimatedGridNodeCounts": bc.get("estimatedGridNodeCounts"),
+                "estimatedGridNodeCount": bc.get("estimatedGridNodeCount"),
+                "gridIndexBounds": bc.get("gridIndexBounds"),
+            }
+            for bc in grid_velocity_cuboid_constraints
+        ],
+        "fixedParticleIndicesGenerated": 0,
         "obstaclePartCount": len(fixed_anchor_objects),
         "mixedBodyObstacleDemotedToMpmCount": 0,
         "bodyCount": len(bodies),
@@ -1819,7 +2098,7 @@ def build_physgaussian_config(payload: dict[str, Any]) -> dict[str, Any]:
         "materialConflictCount": len(material_conflicts),
         "materialConflictsPreview": material_conflicts[:20],
         "filledParticleMaterialMode": "nearest-labeled-gaussian-inheritance; additional_material_params remains as AABB fallback",
-        "pbmpmMode": "pbmpm uses vendor local-global iteration_count, elasticity_ratio, and elastic_relaxation controls; Gaussian covariance is exported from the solver deformation gradient directly",
+        "pbmpmMode": "pbmpm keeps the velocity local-global pipeline; n_min/n_max bound fully automatic inner iterations; plastic_mode=0 commits through shared material return mapping, plastic_mode=1 uses PBMPM stretch clamp yield_min/yield_max",
         "solver": solver,
         "integrator": config["integrator"],
     }
@@ -1834,86 +2113,124 @@ def build_official_physgaussian_config(model: dict[str, Any], payload: dict[str,
     if not path.exists():
         raise HTTPException(status_code=500, detail=f"official config does not exist: {path}")
     config = _read_json(path)
+    official_has_n_grid = "n_grid" in config
     solver = str((payload or {}).get("solver") or "explicit-mpm")
+    integrator = _solver_to_integrator(solver)
     simulation = (payload or {}).get("simulation") or {}
     # Official presets keep their scene, object/material, transforms and
     # boundary conditions. The UI still owns solver choice and time parameters.
-    config["integrator"] = "implicit" if solver == "implicit-mpm" else "pbmpm" if solver == "pbmpm" else "explicit"
-    if solver == "implicit-mpm":
+    config["integrator"] = integrator
+    config["grid_v_damping_scale"] = _simulation_damping(
+        simulation,
+        _config_damping(config),
+    )
+    config["rpic_damping"] = _safe_float(config.get("rpic_damping"), 0.0)
+    if integrator == "implicit":
+        implicit_adaptive_max_split = max(
+            0, _safe_int(simulation.get("implicitAdaptiveMaxSplit"), 3)
+        )
+        implicit_adaptive_min_dt = _safe_float(
+            simulation.get("implicitAdaptiveMinDt"),
+            max(
+                _safe_float(simulation.get("substep_dt"), 1e-4)
+                / (2.0 ** max(implicit_adaptive_max_split, 1)),
+                1e-8,
+            ),
+        )
         config["implicit_mpm"] = {
             "beta": _safe_float(simulation.get("implicitBeta"), 0.25),
             "gamma": _safe_float(simulation.get("implicitGamma"), 0.5),
-            "newton_tol": _safe_float(simulation.get("newtonTol"), 1e-4),
+            "newton_tol": _safe_float(simulation.get("newtonTol"), 5e-4),
             "newton_abs_tol": _safe_float(simulation.get("newtonAbsTol"), 1e-6),
-            "newton_max_iter": _safe_int(simulation.get("newtonMaxIter"), 8),
+            "newton_rms_tol": _safe_float(
+                _first_present(
+                    simulation.get("newtonRmsTol"),
+                    simulation.get("newton_rms_tol"),
+                ),
+                1e-4,
+            ),
+            "newton_max_iter": _safe_int(simulation.get("newtonMaxIter"), 16),
             "gmres_tol": _safe_float(simulation.get("gmresTol"), 1e-3),
+            "gmres_tol_floor": _safe_float(
+                simulation.get("gmresTolFloor"),
+                1e-3,
+            ),
             "gmres_max_iter": _safe_int(simulation.get("gmresMaxIter"), 24),
             "jvp_eps": _safe_float(simulation.get("jvpEps"), 1e-4),
             "line_search_max_iter": _safe_int(simulation.get("lineSearchMaxIter"), 8),
             "armijo_c1": _safe_float(simulation.get("armijoC1"), 1e-4),
-            "ew_eta_min": _safe_float(simulation.get("ewEtaMin"), 1e-5),
-            "ew_eta_max": _safe_float(simulation.get("ewEtaMax"), 0.5),
+            "ew_eta_min": _safe_float(simulation.get("ewEtaMin"), 1e-3),
+            "ew_eta_max": _safe_float(simulation.get("ewEtaMax"), 0.1),
             "ew_gamma": _safe_float(simulation.get("ewGamma"), 0.9),
             "ew_alpha": _safe_float(simulation.get("ewAlpha"), 1.5),
             "stiffness_preconditioner_scale": _safe_float(
                 simulation.get("stiffnessPreconditionerScale"), 1.0
             ),
             "stagnation_tol": _safe_float(simulation.get("stagnationTol"), 1e-8),
+            "allow_best_effort_commit": bool(
+                simulation.get("allowBestEffortCommit", False)
+            ),
+            "near_converged_factor": _safe_float(
+                simulation.get("nearConvergedFactor"), 2.0
+            ),
+            "near_newton_rms_tol": _safe_float(
+                _first_present(
+                    simulation.get("nearNewtonRmsTol"),
+                    simulation.get("near_newton_rms_tol"),
+                ),
+                1e-4,
+            ),
+            "fallback_descent_tol": _safe_float(
+                _first_present(
+                    simulation.get("fallbackDescentTol"),
+                    simulation.get("fallback_descent_tol"),
+                ),
+                1e-8,
+            ),
+            "fallback_step_min_rel": _safe_float(
+                _first_present(
+                    simulation.get("fallbackStepMinRel"),
+                    simulation.get("fallback_step_min_rel"),
+                ),
+                1e-8,
+            ),
+            "fallback_decrease_tol": _safe_float(
+                _first_present(
+                    simulation.get("fallbackDecreaseTol"),
+                    simulation.get("fallback_decrease_tol"),
+                ),
+                1e-6,
+            ),
+            "adaptive_max_split": implicit_adaptive_max_split,
+            "adaptive_min_dt": implicit_adaptive_min_dt,
         }
         config.pop("pbmpm", None)
-    elif solver == "pbmpm":
-        pbmpm_sim = simulation.get("pbmpm") if isinstance(simulation.get("pbmpm"), dict) else {}
-        config["pbmpm"] = {
-            "iteration_count": _safe_int(
-                _first_present(
-                    pbmpm_sim.get("iteration_count"),
-                    pbmpm_sim.get("projection_iterations"),
-                    simulation.get("iteration_count"),
-                    simulation.get("pbmpmIterationCount"),
-                    simulation.get("pbmpmIterations"),
-                ),
-                1,
-            ),
-            "elasticity_ratio": _safe_float(
-                _first_present(
-                    pbmpm_sim.get("elasticity_ratio"),
-                    pbmpm_sim.get("r_scale"),
-                    simulation.get("elasticity_ratio"),
-                    simulation.get("pbmpmElasticityRatio"),
-                    simulation.get("pbmpmRScale"),
-                ),
-                1.0,
-            ),
-            "elastic_relaxation": _safe_float(
-                _first_present(
-                    pbmpm_sim.get("elastic_relaxation"),
-                    pbmpm_sim.get("s_scale"),
-                    simulation.get("elastic_relaxation"),
-                    simulation.get("pbmpmElasticRelaxation"),
-                    simulation.get("pbmpmSScale"),
-                ),
-                1.5,
-            ),
-            "plasticity": _safe_float(
-                _first_present(pbmpm_sim.get("plasticity"), simulation.get("pbmpmPlasticity")),
-                0.0,
-            ),
-            "yield_min": _safe_float(
-                _first_present(pbmpm_sim.get("yield_min"), simulation.get("pbmpmYieldMin")),
-                0.55,
-            ),
-            "yield_max": _safe_float(
-                _first_present(pbmpm_sim.get("yield_max"), simulation.get("pbmpmYieldMax")),
-                1.85,
-            ),
-        }
+    elif integrator == "pbmpm":
+        config["pbmpm"] = _pbmpm_config_from_simulation(simulation)
         config.pop("implicit_mpm", None)
     else:
         config.pop("implicit_mpm", None)
         config.pop("pbmpm", None)
-    config["substep_dt"] = _safe_float(simulation.get("substep_dt"), _safe_float(config.get("substep_dt"), 1e-4))
+    official_substep_dt = _safe_float(config.get("substep_dt"), 1e-4)
+    config["substep_dt"] = _safe_float(simulation.get("substep_dt"), official_substep_dt)
     config["frame_dt"] = _safe_float(simulation.get("frame_dt"), _safe_float(config.get("frame_dt"), 2e-2))
     config["frame_num"] = _safe_int(simulation.get("frame_num"), DEFAULT_FRAME_NUM)
+    payload_n_grid = ((payload or {}).get("preprocessing") or {}).get("n_grid")
+    default_n_grid = _safe_int(config.get("n_grid"), 50) if official_has_n_grid else 50
+    config["n_grid"] = _safe_int(
+        payload_n_grid,
+        default_n_grid,
+    )
+    if integrator == "explicit" and not official_has_n_grid:
+        reference_n_grid = 50
+        requested_substep_dt = _safe_float(config.get("substep_dt"), official_substep_dt)
+        config["explicit_mpm"] = {
+            "requested_substep_dt": requested_substep_dt,
+            "effective_substep_dt": requested_substep_dt,
+            "reference_n_grid": reference_n_grid,
+            "n_grid": _safe_int(config.get("n_grid"), reference_n_grid),
+            "policy": "no_automatic_substep_dt_scaling",
+        }
     return config
 
 
@@ -2053,7 +2370,11 @@ def _write_rigid_preview_motion(run_id: str, model: dict[str, Any], payload: dic
         body_parts = bodies.get(body_id, []) if body_id is not None else []
         drive = _drive_params(drive_source or {})
         drive["linearEnabled"] = True
-        drive["linearForce"] = drag_velocity
+        drive["linearVelocity"] = drag_velocity
+        drive["targetVelocity"] = drag_velocity
+        drive["dirichletVelocity"] = drag_velocity
+        drive["prescribedVelocity"] = drag_velocity
+        drive["hasExplicitVelocity"] = True
         drive["spinEnabled"] = False
         drive["spinAngular"] = 0.0
     else:
@@ -2103,8 +2424,8 @@ def _write_rigid_preview_motion(run_id: str, model: dict[str, Any], payload: dic
     mins, maxs = _point_bbox(selected)
     diag = math.sqrt(sum((maxs[i] - mins[i]) ** 2 for i in range(3)))
     total_time = max((frame_count - 1) * frame_dt, frame_dt)
-    force = drive["linearForce"] if drive["linearEnabled"] else [0.0, 0.0, 0.0]
-    velocity = [float(force[i]) for i in range(3)]
+    velocity_source = drive["prescribedVelocity"] if drive["linearEnabled"] else [0.0, 0.0, 0.0]
+    velocity = [float(velocity_source[i]) for i in range(3)]
     total_displacement = _clamp_vector_length(
         [velocity[i] * total_time for i in range(3)],
         max(diag * 0.35, 1e-4),
@@ -2169,7 +2490,7 @@ def _write_rigid_preview_motion(run_id: str, model: dict[str, Any], payload: dic
         group_nus.append(sum(params["nu"] * weight for params, weight in zip(group_params, weights)) / weight_sum)
         group_densities.append(sum(params["density"] * weight for params, weight in zip(group_params, weights)) / weight_sum)
     proxy_stress_scale = _safe_float(preview.get("stressScale"), 0.35)
-    proxy_grid_damping = _safe_float(preview.get("gridDamping"), 0.995)
+    proxy_grid_damping = _safe_float(preview.get("gridDamping"), 1.0)
     kinematic_drive_groups = {hit_group} if hit_group is not None and hit_group in fixed_group_ids else set()
     if not drag_mode and fixed_group_ids and drive.get("linearEnabled"):
         kinematic_drive_groups = set(fixed_group_ids)
@@ -2451,14 +2772,14 @@ def schema() -> dict[str, Any]:
         ],
         "simulation": [
             "officialConfig.enabled uses the model's bundled official PhysGaussian JSON for scene/object config while preserving UI-selected solver and time parameters",
-            "solver supports explicit-mpm, implicit-mpm, and pbmpm local/global elasticity controls; object-energy / finite rigid-body options remain experimental UI placeholders",
+            "solver supports explicit-mpm, implicit-mpm, and pbmpm; pbmpm k is fully automatic from material parameters and n_min/n_max, with plastic_mode choosing shared material return mapping or PBMPM stretch clamp bounds",
             "gravityEnabled + gravity",
             "groundEnabled + groundHeight",
             "boundingBoxEnabled",
             "per-body drive.linear: force, num_dt, start_time, union AABB target",
             "per-body drive.spin: maps to PhysGaussian enforce_particle_velocity_rotation over the body union AABB",
-            "per-part selected Gaussian indices map to particle_material_params for exact E/nu/density on original Gaussian particles",
-            "per-part material=obstacle is a legacy UI value for fixed anchors; selected Gaussian indices stay in MPM and are fixed by fixed_particle_indices",
+            "per-part selected Gaussian indices map to particle_material_params for exact E/nu/density/yield_stress on original Gaussian particles",
+            "per-part material=obstacle creates a grid velocity cuboid constraint (type=cuboid / set_velocity_on_cuboid); selected Gaussian indices remain material/active labels, not fixed particles",
             "POST /api/preview/voxel-rigid writes a lightweight voxel-center rigid motion package with position+rotation+scale; /api/preview/rigid-linear is kept as a compatibility alias",
             "POST /api/preview/voxel-groups returns automatic voxel-center grouping diagnostics for the current imported model and Part/Body labels",
             "frame_dt, frame_num, substep_dt; large substep_dt is allowed for instability tests, and substep_dt >= frame_dt advances one explicit step per rendered frame",
@@ -2473,7 +2794,7 @@ def schema() -> dict[str, Any]:
         "stockLimitations": [
             "objects are material parts; all assigned parts are simulated; parts with the same bodyId share one physical body transform/scale and drive target",
             "additional_material_params still changes filled/internal particles by part AABB; original Gaussian particles are corrected by selected index labels",
-            "official cuboid constraints are grid boundary conditions; UI fixed anchors are index-bound particles with zero velocity and fixed rest position",
+            "cuboid constraints are grid boundary conditions; UI fixed anchors use grid velocity cuboids with padding diagnostics, not fixed particle attributes",
             "per-particle labels and finite-mass rigid bodies require solver changes",
         ],
     }

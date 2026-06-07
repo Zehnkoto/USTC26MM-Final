@@ -121,6 +121,47 @@ def von_mises_return_mapping(F_trial: wp.mat33, model: MPMModelStruct, p: int):
 
 
 @wp.func
+def evaluate_von_mises_return_mapping(F_trial: wp.mat33, model: MPMModelStruct, p: int):
+    U = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    V = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    sig_old = wp.vec3(0.0)
+    wp.svd3(F_trial, U, sig_old, V)
+
+    sig = wp.vec3(
+        wp.max(sig_old[0], 0.01), wp.max(sig_old[1], 0.01), wp.max(sig_old[2], 0.01)
+    )
+    epsilon = wp.vec3(wp.log(sig[0]), wp.log(sig[1]), wp.log(sig[2]))
+    temp = (epsilon[0] + epsilon[1] + epsilon[2]) / 3.0
+
+    tau = 2.0 * model.mu[p] * epsilon + model.lam[p] * (
+        epsilon[0] + epsilon[1] + epsilon[2]
+    ) * wp.vec3(1.0, 1.0, 1.0)
+    sum_tau = tau[0] + tau[1] + tau[2]
+    cond = wp.vec3(
+        tau[0] - sum_tau / 3.0, tau[1] - sum_tau / 3.0, tau[2] - sum_tau / 3.0
+    )
+    if wp.length(cond) > model.yield_stress[p]:
+        epsilon_hat = epsilon - wp.vec3(temp, temp, temp)
+        epsilon_hat_norm = wp.length(epsilon_hat) + 1e-6
+        delta_gamma = epsilon_hat_norm - model.yield_stress[p] / (2.0 * model.mu[p])
+        epsilon = epsilon - (delta_gamma / epsilon_hat_norm) * epsilon_hat
+        sig_elastic = wp.mat33(
+            wp.exp(epsilon[0]),
+            0.0,
+            0.0,
+            0.0,
+            wp.exp(epsilon[1]),
+            0.0,
+            0.0,
+            0.0,
+            wp.exp(epsilon[2]),
+        )
+        return U * sig_elastic * wp.transpose(V)
+    else:
+        return F_trial
+
+
+@wp.func
 def von_mises_return_mapping_with_damage(
     F_trial: wp.mat33, model: MPMModelStruct, p: int
 ):
@@ -172,6 +213,51 @@ def von_mises_return_mapping_with_damage(
                 model.yield_stress[p] + 2.0 * model.mu[p] * model.xi * delta_gamma
             )
         return F_elastic
+    else:
+        return F_trial
+
+
+@wp.func
+def evaluate_von_mises_return_mapping_with_damage(
+    F_trial: wp.mat33, model: MPMModelStruct, p: int
+):
+    U = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    V = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    sig_old = wp.vec3(0.0)
+    wp.svd3(F_trial, U, sig_old, V)
+
+    sig = wp.vec3(
+        wp.max(sig_old[0], 0.01), wp.max(sig_old[1], 0.01), wp.max(sig_old[2], 0.01)
+    )
+    epsilon = wp.vec3(wp.log(sig[0]), wp.log(sig[1]), wp.log(sig[2]))
+    temp = (epsilon[0] + epsilon[1] + epsilon[2]) / 3.0
+
+    tau = 2.0 * model.mu[p] * epsilon + model.lam[p] * (
+        epsilon[0] + epsilon[1] + epsilon[2]
+    ) * wp.vec3(1.0, 1.0, 1.0)
+    sum_tau = tau[0] + tau[1] + tau[2]
+    cond = wp.vec3(
+        tau[0] - sum_tau / 3.0, tau[1] - sum_tau / 3.0, tau[2] - sum_tau / 3.0
+    )
+    if wp.length(cond) > model.yield_stress[p]:
+        if model.yield_stress[p] <= 0:
+            return F_trial
+        epsilon_hat = epsilon - wp.vec3(temp, temp, temp)
+        epsilon_hat_norm = wp.length(epsilon_hat) + 1e-6
+        delta_gamma = epsilon_hat_norm - model.yield_stress[p] / (2.0 * model.mu[p])
+        epsilon = epsilon - (delta_gamma / epsilon_hat_norm) * epsilon_hat
+        sig_elastic = wp.mat33(
+            wp.exp(epsilon[0]),
+            0.0,
+            0.0,
+            0.0,
+            wp.exp(epsilon[1]),
+            0.0,
+            0.0,
+            0.0,
+            wp.exp(epsilon[2]),
+        )
+        return U * sig_elastic * wp.transpose(V)
     else:
         return F_trial
 
@@ -264,6 +350,55 @@ def sand_return_mapping(
     return F_elastic
 
 
+@wp.func
+def material_return_mapping(
+    F_trial: wp.mat33,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    p: int,
+    dt: float,
+):
+    if model.material == 1:
+        return von_mises_return_mapping(F_trial, model, p)
+    elif model.material == 2:
+        return sand_return_mapping(F_trial, state, model, p)
+    elif model.material == 3:
+        return viscoplasticity_return_mapping_with_StVK(F_trial, model, p, dt)
+    elif model.material == 5:
+        return von_mises_return_mapping_with_damage(F_trial, model, p)
+    return F_trial
+
+
+@wp.func
+def evaluate_material_return_mapping(
+    F_trial: wp.mat33,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    p: int,
+    dt: float,
+):
+    if model.material == 1:
+        return evaluate_von_mises_return_mapping(F_trial, model, p)
+    elif model.material == 2:
+        return sand_return_mapping(F_trial, state, model, p)
+    elif model.material == 3:
+        return viscoplasticity_return_mapping_with_StVK(F_trial, model, p, dt)
+    elif model.material == 5:
+        return evaluate_von_mises_return_mapping_with_damage(F_trial, model, p)
+    return F_trial
+
+
+@wp.func
+def commit_material_return_mapping(
+    F_trial: wp.mat33,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    p: int,
+    dt: float,
+):
+    return material_return_mapping(F_trial, state, model, p, dt)
+
+
 @wp.kernel
 def compute_mu_lam_from_E_nu(state: MPMStateStruct, model: MPMModelStruct):
     p = wp.tid()
@@ -279,6 +414,40 @@ def zero_grid(state: MPMStateStruct, model: MPMModelStruct):
     state.grid_m[grid_x, grid_y, grid_z] = 0.0
     state.grid_v_in[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
     state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
+
+
+@wp.kernel
+def apply_fixed_particle_indices(
+    time: float,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    modifier: FixedParticleModifier,
+):
+    tid = wp.tid()
+    p = modifier.indices[tid]
+    if (
+        p >= 0
+        and p < model.n_particles
+    ):
+        zero_mat = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        motion_time = wp.min(
+            wp.max(time - modifier.start_time, 0.0),
+            wp.max(modifier.end_time - modifier.start_time, 0.0),
+        )
+        active_velocity = wp.vec3(0.0, 0.0, 0.0)
+        if time >= modifier.start_time and time < modifier.end_time:
+            active_velocity = modifier.velocity
+        state.particle_x[p] = modifier.rest_x[tid] + modifier.velocity * motion_time
+        state.particle_v[p] = active_velocity
+        state.particle_C[p] = zero_mat
+        state.particle_D[p] = zero_mat
+        if modifier.reset_deformation != 0:
+            state.particle_F[p] = I33
+            state.particle_F_trial[p] = I33
+            state.particle_R[p] = I33
+            state.particle_stress[p] = zero_mat
+            state.particle_Jp[p] = 0.0
 
 
 @wp.func
@@ -369,50 +538,51 @@ def p2g_apic_with_stress(state: MPMStateStruct, model: MPMModelStruct, dt: float
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
-        dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+            )
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
+            dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
 
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    dpos = (
-                        wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
-                    ) * model.dx
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    weight = w[0, i] * w[1, j] * w[2, k]  # tricubic interpolation
-                    dweight = compute_dweight(model, w, dw, i, j, k)
-                    C = state.particle_C[p]
-                    # if model.rpic = 0, standard apic
-                    C = (1.0 - model.rpic_damping) * C + model.rpic_damping / 2.0 * (
-                        C - wp.transpose(C)
-                    )
-                    if model.rpic_damping < -0.001:
-                        # standard pic
-                        C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        dpos = (
+                            wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
+                        ) * model.dx
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        weight = w[0, i] * w[1, j] * w[2, k]  # tricubic interpolation
+                        dweight = compute_dweight(model, w, dw, i, j, k)
+                        C = state.particle_C[p]
+                        # if model.rpic = 0, standard apic
+                        C = (1.0 - model.rpic_damping) * C + model.rpic_damping / 2.0 * (
+                            C - wp.transpose(C)
+                        )
+                        if model.rpic_damping < -0.001:
+                            # standard pic
+                            C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-                    elastic_force = -state.particle_vol[p] * stress * dweight
-                    v_in_add = (
-                        weight
-                        * state.particle_mass[p]
-                        * (state.particle_v[p] + C * dpos)
-                        + dt * elastic_force
-                    )
-                    wp.atomic_add(state.grid_v_in, ix, iy, iz, v_in_add)
-                    wp.atomic_add(
-                        state.grid_m, ix, iy, iz, weight * state.particle_mass[p]
-                    )
+                        elastic_force = -state.particle_vol[p] * stress * dweight
+                        v_in_add = (
+                            weight
+                            * state.particle_mass[p]
+                            * (state.particle_v[p] + C * dpos)
+                            + dt * elastic_force
+                        )
+                        wp.atomic_add(state.grid_v_in, ix, iy, iz, v_in_add)
+                        wp.atomic_add(
+                            state.grid_m, ix, iy, iz, weight * state.particle_mass[p]
+                        )
 
 
 @wp.kernel
@@ -434,41 +604,42 @@ def p2g_apic_no_stress(state: MPMStateStruct, model: MPMModelStruct):
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+            )
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
 
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    dpos = (
-                        wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
-                    ) * model.dx
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    weight = w[0, i] * w[1, j] * w[2, k]
-                    C = state.particle_C[p]
-                    C = (1.0 - model.rpic_damping) * C + model.rpic_damping / 2.0 * (
-                        C - wp.transpose(C)
-                    )
-                    if model.rpic_damping < -0.001:
-                        C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-                    momentum = weight * state.particle_mass[p] * (
-                        state.particle_v[p] + C * dpos
-                    )
-                    wp.atomic_add(state.grid_v_in, ix, iy, iz, momentum)
-                    wp.atomic_add(
-                        state.grid_m, ix, iy, iz, weight * state.particle_mass[p]
-                    )
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        dpos = (
+                            wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
+                        ) * model.dx
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        weight = w[0, i] * w[1, j] * w[2, k]
+                        C = state.particle_C[p]
+                        C = (1.0 - model.rpic_damping) * C + model.rpic_damping / 2.0 * (
+                            C - wp.transpose(C)
+                        )
+                        if model.rpic_damping < -0.001:
+                            C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                        momentum = weight * state.particle_mass[p] * (
+                            state.particle_v[p] + C * dpos
+                        )
+                        wp.atomic_add(state.grid_v_in, ix, iy, iz, momentum)
+                        wp.atomic_add(
+                            state.grid_m, ix, iy, iz, weight * state.particle_mass[p]
+                        )
 
 
 @wp.kernel
@@ -496,6 +667,14 @@ def grid_normalization_and_gravity(
 
 
 @wp.kernel
+def add_damping_via_grid(state: MPMStateStruct, scale: float):
+    grid_x, grid_y, grid_z = wp.tid()
+    state.grid_v_out[grid_x, grid_y, grid_z] = (
+        state.grid_v_out[grid_x, grid_y, grid_z] * scale
+    )
+
+
+@wp.kernel
 def g2p(state: MPMStateStruct, model: MPMModelStruct, dt: float):
     p = wp.tid()
     if state.particle_selection[p] == 0:
@@ -511,58 +690,59 @@ def g2p(state: MPMStateStruct, model: MPMModelStruct, dt: float):
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
-        dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
-        new_v = wp.vec3(0.0, 0.0, 0.0)
-        new_C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        new_F = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    dpos = wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
-                    weight = w[0, i] * w[1, j] * w[2, k]  # tricubic interpolation
-                    grid_v = state.grid_v_out[ix, iy, iz]
-                    new_v = new_v + grid_v * weight
-                    new_C = new_C + wp.outer(grid_v, dpos) * (
-                        weight * model.inv_dx * 4.0
-                    )
-                    dweight = compute_dweight(model, w, dw, i, j, k)
-                    new_F = new_F + wp.outer(grid_v, dweight)
-
-        new_x = state.particle_x[p] + dt * new_v
-        new_grid_pos = new_x * model.inv_dx
-        new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
-        new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
-        new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
-        if not mpm_stencil_in_grid(
-            new_base_pos_x, new_base_pos_y, new_base_pos_z, model
-        ):
-            new_x = mpm_clamp_to_grid_domain(new_x, model)
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+            )
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
+            dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
             new_v = wp.vec3(0.0, 0.0, 0.0)
-            new_C = mpm_zero_mat33()
-            new_F = mpm_zero_mat33()
-        state.particle_v[p] = new_v
-        state.particle_x[p] = new_x
-        state.particle_C[p] = new_C
-        I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        F_tmp = (I33 + new_F * dt) * state.particle_F[p]
-        state.particle_F_trial[p] = F_tmp
+            new_C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            new_F = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        dpos = wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
+                        weight = w[0, i] * w[1, j] * w[2, k]  # tricubic interpolation
+                        grid_v = state.grid_v_out[ix, iy, iz]
+                        new_v = new_v + grid_v * weight
+                        new_C = new_C + wp.outer(grid_v, dpos) * (
+                            weight * model.inv_dx * 4.0
+                        )
+                        dweight = compute_dweight(model, w, dw, i, j, k)
+                        new_F = new_F + wp.outer(grid_v, dweight)
 
-        if model.update_cov_with_F:
-            update_cov(state, p, new_F, dt)
+            new_x = state.particle_x[p] + dt * new_v
+            new_grid_pos = new_x * model.inv_dx
+            new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
+            new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
+            new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
+            if not mpm_stencil_in_grid(
+                new_base_pos_x, new_base_pos_y, new_base_pos_z, model
+            ):
+                new_x = mpm_clamp_to_grid_domain(new_x, model)
+                new_v = wp.vec3(0.0, 0.0, 0.0)
+                new_C = mpm_zero_mat33()
+                new_F = mpm_zero_mat33()
+            state.particle_v[p] = new_v
+            state.particle_x[p] = new_x
+            state.particle_C[p] = new_C
+            I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+            F_tmp = (I33 + new_F * dt) * state.particle_F[p]
+            state.particle_F_trial[p] = F_tmp
+
+            if model.update_cov_with_F:
+                update_cov(state, p, new_F, dt)
 
 
 @wp.func
@@ -602,7 +782,21 @@ def pbmpm_clamp_to_grid_domain(x: wp.vec3, model: MPMModelStruct):
 
 
 @wp.func
-def pbmpm_solve_D(F_base: wp.mat33, D_in: wp.mat33, model: MPMModelStruct, p: int):
+def pbmpm_zero_particle_kinematics(state: MPMStateStruct, p: int):
+    state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+    state.particle_C[p] = mpm_zero_mat33()
+    state.particle_D[p] = mpm_zero_mat33()
+
+
+@wp.func
+def pbmpm_solve_D(
+    F_base: wp.mat33,
+    D_in: wp.mat33,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    p: int,
+    dt: float,
+):
     I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     F = (I33 + D_in) * F_base
 
@@ -623,24 +817,15 @@ def pbmpm_solve_D(F_base: wp.mat33, D_in: wp.mat33, model: MPMModelStruct, p: in
         V[2, 2] = -V[2, 2]
         sig[2] = -sig[2]
 
-    sig_safe = wp.vec3(
-        wp.max(wp.abs(sig[0]), 0.01),
-        wp.max(wp.abs(sig[1]), 0.01),
-        wp.max(wp.abs(sig[2]), 0.01),
-    )
-
-    plastic_alpha = wp.min(wp.max(model.pbmpm_plasticity, 0.0), 1.0)
-    if plastic_alpha > 1e-6:
+    if model.pbmpm_plastic_mode == 1:
         lo = wp.max(model.pbmpm_yield_min, 0.01)
         hi = wp.max(model.pbmpm_yield_max, lo + 1e-4)
         sig_clamped = wp.vec3(
-            wp.min(wp.max(sig_safe[0], lo), hi),
-            wp.min(wp.max(sig_safe[1], lo), hi),
-            wp.min(wp.max(sig_safe[2], lo), hi),
+            wp.min(wp.max(wp.max(wp.abs(sig[0]), 0.01), lo), hi),
+            wp.min(wp.max(wp.max(wp.abs(sig[1]), 0.01), lo), hi),
+            wp.min(wp.max(wp.max(wp.abs(sig[2]), 0.01), lo), hi),
         )
-        F_plastic = U * wp.diag(sig_clamped) * wp.transpose(V)
-        F = F + (F_plastic - F) * plastic_alpha
-        wp.svd3(F, U, sig_safe, V)
+        F = U * wp.diag(sig_clamped) * wp.transpose(V)
 
     R = U * wp.transpose(V)
 
@@ -660,11 +845,11 @@ def pbmpm_solve_D(F_base: wp.mat33, D_in: wp.mat33, model: MPMModelStruct, p: in
 
 
 @wp.kernel
-def pbmpm_solve_constraints(state: MPMStateStruct, model: MPMModelStruct):
+def pbmpm_solve_constraints(state: MPMStateStruct, model: MPMModelStruct, dt: float):
     p = wp.tid()
     if state.particle_selection[p] == 0:
         state.particle_D[p] = pbmpm_solve_D(
-            state.particle_F[p], state.particle_D[p], model, p
+            state.particle_F[p], state.particle_D[p], state, model, p, dt
         )
 
 
@@ -676,14 +861,16 @@ def p2g_pbmpm_with_D(state: MPMStateStruct, model: MPMModelStruct, dt: float):
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
-        if (
-            base_pos_x >= 0
-            and base_pos_y >= 0
-            and base_pos_z >= 0
-            and base_pos_x + 2 < model.grid_dim_x
-            and base_pos_y + 2 < model.grid_dim_y
-            and base_pos_z + 2 < model.grid_dim_z
-        ):
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = pbmpm_clamp_to_grid_domain(
+                state.particle_x[p], model
+            )
+            pbmpm_zero_particle_kinematics(state, p)
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
             fx = grid_pos - wp.vec3(
                 wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
             )
@@ -714,22 +901,6 @@ def p2g_pbmpm_with_D(state: MPMStateStruct, model: MPMModelStruct, dt: float):
                         wp.atomic_add(
                             state.grid_m, ix, iy, iz, weight * state.particle_mass[p]
                         )
-        else:
-            state.particle_x[p] = pbmpm_clamp_to_grid_domain(
-                state.particle_x[p], model
-            )
-            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
-            state.particle_D[p] = wp.mat33(
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            )
 
 
 @wp.kernel
@@ -740,14 +911,16 @@ def g2p_pbmpm_update_D(state: MPMStateStruct, model: MPMModelStruct, dt: float):
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
-        if (
-            base_pos_x >= 0
-            and base_pos_y >= 0
-            and base_pos_z >= 0
-            and base_pos_x + 2 < model.grid_dim_x
-            and base_pos_y + 2 < model.grid_dim_y
-            and base_pos_z + 2 < model.grid_dim_z
-        ):
+        if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            state.particle_x[p] = pbmpm_clamp_to_grid_domain(
+                state.particle_x[p], model
+            )
+            pbmpm_zero_particle_kinematics(state, p)
+            grid_pos = state.particle_x[p] * model.inv_dx
+            base_pos_x = wp.int(grid_pos[0] - 0.5)
+            base_pos_y = wp.int(grid_pos[1] - 0.5)
+            base_pos_z = wp.int(grid_pos[2] - 0.5)
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
             fx = grid_pos - wp.vec3(
                 wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
             )
@@ -784,41 +957,14 @@ def g2p_pbmpm_update_D(state: MPMStateStruct, model: MPMModelStruct, dt: float):
             state.particle_v[p] = new_v
             state.particle_C[p] = new_C
             state.particle_D[p] = pbmpm_clamp_mat33(grad_v * dt, 1.0)
-        else:
-            state.particle_x[p] = pbmpm_clamp_to_grid_domain(
-                state.particle_x[p], model
-            )
-            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
-            state.particle_C[p] = wp.mat33(
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            )
-            state.particle_D[p] = wp.mat33(
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            )
 
 
 @wp.kernel
-def pbmpm_project_constraints(state: MPMStateStruct, model: MPMModelStruct):
+def pbmpm_project_constraints(state: MPMStateStruct, model: MPMModelStruct, dt: float):
     p = wp.tid()
     if state.particle_selection[p] == 0:
         state.particle_D[p] = pbmpm_solve_D(
-            state.particle_F[p], state.particle_D[p], model, p
+            state.particle_F[p], state.particle_D[p], state, model, p, dt
         )
         I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
         state.particle_F_trial[p] = (I33 + state.particle_D[p]) * state.particle_F[p]
@@ -829,32 +975,40 @@ def pbmpm_integrate_particles(state: MPMStateStruct, model: MPMModelStruct, dt: 
     p = wp.tid()
     if state.particle_selection[p] == 0:
         I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        F_tmp = (I33 + state.particle_D[p]) * state.particle_F[p]
-        if model.material == 1:
-            state.particle_F[p] = von_mises_return_mapping(F_tmp, model, p)
-        elif model.material == 2:
-            state.particle_F[p] = sand_return_mapping(F_tmp, state, model, p)
-        elif model.material == 3:
-            state.particle_F[p] = viscoplasticity_return_mapping_with_StVK(
-                F_tmp, model, p, dt
-            )
-        elif model.material == 5:
-            state.particle_F[p] = von_mises_return_mapping_with_damage(
-                F_tmp, model, p
-            )
-        else:
+        D_commit = state.particle_D[p]
+        new_x = state.particle_x[p] + dt * state.particle_v[p]
+        new_grid_pos = new_x * model.inv_dx
+        new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
+        new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
+        new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
+        left_grid = not mpm_stencil_in_grid(
+            new_base_pos_x, new_base_pos_y, new_base_pos_z, model
+        )
+        if left_grid:
+            new_x = pbmpm_clamp_to_grid_domain(new_x, model)
+            D_commit = mpm_zero_mat33()
+            state.particle_D[p] = D_commit
+        F_tmp = (I33 + D_commit) * state.particle_F[p]
+        if model.pbmpm_plastic_mode == 1:
+            # PBMPM stretch clamp owns plastic limiting in this mode; avoid a
+            # second material return mapping in the same frame.
             state.particle_F[p] = F_tmp
+        else:
+            state.particle_F[p] = commit_material_return_mapping(
+                F_tmp, state, model, p, dt
+            )
         state.particle_F_trial[p] = state.particle_F[p]
-        state.particle_x[p] = state.particle_x[p] + dt * state.particle_v[p]
-        state.particle_x[p] = pbmpm_clamp_to_grid_domain(state.particle_x[p], model)
-        state.particle_v[p] = state.particle_v[p] + model.gravitational_accelaration * dt
+        state.particle_x[p] = new_x
         if model.update_cov_with_F:
             update_cov(
                 state,
                 p,
-                state.particle_D[p] * (1.0 / wp.max(dt, 1e-9)),
+                D_commit * (1.0 / wp.max(dt, 1e-9)),
                 dt,
             )
+        state.particle_v[p] = state.particle_v[p] + model.gravitational_accelaration * dt
+        if left_grid:
+            pbmpm_zero_particle_kinematics(state, p)
 
 
 @wp.kernel
@@ -873,25 +1027,10 @@ def compute_stress_from_F_trial(
 ):
     p = wp.tid()
     if state.particle_selection[p] == 0:
-        # apply return mapping
-        if model.material == 1:  # metal
-            state.particle_F[p] = von_mises_return_mapping(
-                state.particle_F_trial[p], model, p
-            )
-        elif model.material == 2:  # sand
-            state.particle_F[p] = sand_return_mapping(
-                state.particle_F_trial[p], state, model, p
-            )
-        elif model.material == 3:  # visplas, with StVk+VM, no thickening
-            state.particle_F[p] = viscoplasticity_return_mapping_with_StVK(
-                state.particle_F_trial[p], model, p, dt
-            )
-        elif model.material == 5:
-            state.particle_F[p] = von_mises_return_mapping_with_damage(
-                state.particle_F_trial[p], model, p
-            )
-        else:  # elastic
-            state.particle_F[p] = state.particle_F_trial[p]
+        state.particle_F[p] = commit_material_return_mapping(
+            state.particle_F_trial[p], state, model, p, dt
+        )
+        state.particle_F_trial[p] = state.particle_F[p]
 
         # also compute stress here
         J = wp.determinant(state.particle_F[p])
@@ -935,6 +1074,19 @@ def zero_grid_int(grid: wp.array(dtype=int, ndim=3)):
 
 
 @wp.kernel
+def merge_dirichlet_grid(
+    mask: wp.array(dtype=int, ndim=3),
+    target: wp.array(dtype=wp.vec3, ndim=3),
+    source_mask: wp.array(dtype=int, ndim=3),
+    source_target: wp.array(dtype=wp.vec3, ndim=3),
+):
+    grid_x, grid_y, grid_z = wp.tid()
+    if source_mask[grid_x, grid_y, grid_z] > 0:
+        mask[grid_x, grid_y, grid_z] = 1
+        target[grid_x, grid_y, grid_z] = source_target[grid_x, grid_y, grid_z]
+
+
+@wp.kernel
 def zero_grid_float(grid: wp.array(dtype=float, ndim=3)):
     grid_x, grid_y, grid_z = wp.tid()
     grid[grid_x, grid_y, grid_z] = 0.0
@@ -946,6 +1098,7 @@ def implicit_du_to_velocity(
     grid_du: wp.array(dtype=wp.vec3, ndim=3),
     grid_vn: wp.array(dtype=wp.vec3, ndim=3),
     grid_an: wp.array(dtype=wp.vec3, ndim=3),
+    grid_v_trial: wp.array(dtype=wp.vec3, ndim=3),
     beta: float,
     gamma: float,
     dt: float,
@@ -958,11 +1111,11 @@ def implicit_du_to_velocity(
         a_np1 = (
             du - dt * v_n - dt * dt * (0.5 - beta) * a_n
         ) * (1.0 / (beta * dt * dt))
-        state.grid_v_out[grid_x, grid_y, grid_z] = (
+        grid_v_trial[grid_x, grid_y, grid_z] = (
             v_n + dt * ((1.0 - gamma) * a_n + gamma * a_np1)
         )
     else:
-        state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
+        grid_v_trial[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
 
 
 @wp.kernel
@@ -1014,78 +1167,80 @@ def implicit_project_du_from_velocity(
 def implicit_compute_trial_stress(
     state: MPMStateStruct,
     model: MPMModelStruct,
+    grid_v_trial: wp.array(dtype=wp.vec3, ndim=3),
     trial_F: wp.array(dtype=wp.mat33),
     trial_stress: wp.array(dtype=wp.mat33),
     dt: float,
 ):
     p = wp.tid()
     if state.particle_selection[p] == 0:
-        grid_pos = state.particle_x[p] * model.inv_dx
+        trial_F[p] = state.particle_F[p]
+        trial_stress[p] = mpm_zero_mat33()
+        particle_x = state.particle_x[p]
+        clamped_x = particle_x
+        grid_pos = clamped_x * model.inv_dx
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
         if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
-            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
-            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
-            state.particle_C[p] = mpm_zero_mat33()
-            grid_pos = state.particle_x[p] * model.inv_dx
+            clamped_x = mpm_clamp_to_grid_domain(particle_x, model)
+            grid_pos = clamped_x * model.inv_dx
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
-        dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
-        grad_v = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    dweight = compute_dweight(model, w, dw, i, j, k)
-                    grid_v = state.grid_v_out[ix, iy, iz]
-                    grad_v = grad_v + wp.outer(grid_v, dweight)
-
-        I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        F_tmp = (I33 + grad_v * dt) * state.particle_F[p]
-        F_elastic = F_tmp
-        if model.material == 1:
-            F_elastic = von_mises_return_mapping(F_tmp, model, p)
-        elif model.material == 2:
-            F_elastic = sand_return_mapping(F_tmp, state, model, p)
-        elif model.material == 3:
-            F_elastic = viscoplasticity_return_mapping_with_StVK(F_tmp, model, p, dt)
-        elif model.material == 5:
-            F_elastic = von_mises_return_mapping_with_damage(F_tmp, model, p)
-
-        J = wp.determinant(F_elastic)
-        U = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        V = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        sig = wp.vec3(0.0)
-        stress = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        wp.svd3(F_elastic, U, sig, V)
-        if model.material == 0 or model.material == 5:
-            stress = kirchoff_stress_FCR(F_elastic, U, V, J, model.mu[p], model.lam[p])
-        if model.material == 1:
-            stress = kirchoff_stress_StVK(F_elastic, U, V, sig, model.mu[p], model.lam[p])
-        if model.material == 2:
-            stress = kirchoff_stress_drucker_prager(
-                F_elastic, U, V, sig, model.mu[p], model.lam[p]
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
             )
-        if model.material == 3:
-            stress = kirchoff_stress_StVK(F_elastic, U, V, sig, model.mu[p], model.lam[p])
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
+            dw = wp.mat33(
+                fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5)
+            )
+            grad_v = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        dweight = compute_dweight(model, w, dw, i, j, k)
+                        grid_v = grid_v_trial[ix, iy, iz]
+                        grad_v = grad_v + wp.outer(grid_v, dweight)
 
-        trial_F[p] = F_elastic
-        trial_stress[p] = (stress + wp.transpose(stress)) / 2.0
+            I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+            F_tmp = (I33 + grad_v * dt) * state.particle_F[p]
+            F_elastic = evaluate_material_return_mapping(F_tmp, state, model, p, dt)
+
+            J = wp.determinant(F_elastic)
+            U = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            V = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            sig = wp.vec3(0.0)
+            stress = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            wp.svd3(F_elastic, U, sig, V)
+            if model.material == 0 or model.material == 5:
+                stress = kirchoff_stress_FCR(F_elastic, U, V, J, model.mu[p], model.lam[p])
+            if model.material == 1:
+                stress = kirchoff_stress_StVK(
+                    F_elastic, U, V, sig, model.mu[p], model.lam[p]
+                )
+            if model.material == 2:
+                stress = kirchoff_stress_drucker_prager(
+                    F_elastic, U, V, sig, model.mu[p], model.lam[p]
+                )
+            if model.material == 3:
+                stress = kirchoff_stress_StVK(
+                    F_elastic, U, V, sig, model.mu[p], model.lam[p]
+                )
+
+            trial_F[p] = F_elastic
+            trial_stress[p] = (stress + wp.transpose(stress)) / 2.0
 
 
 @wp.kernel
@@ -1096,45 +1251,48 @@ def implicit_accumulate_stiffness_diag(
 ):
     p = wp.tid()
     if state.particle_selection[p] == 0:
-        grid_pos = state.particle_x[p] * model.inv_dx
+        particle_x = state.particle_x[p]
+        clamped_x = particle_x
+        grid_pos = clamped_x * model.inv_dx
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
         if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
-            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
-            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
-            state.particle_C[p] = mpm_zero_mat33()
-            grid_pos = state.particle_x[p] * model.inv_dx
+            clamped_x = mpm_clamp_to_grid_domain(particle_x, model)
+            grid_pos = clamped_x * model.inv_dx
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
-        dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
-        stiffness = state.particle_vol[p] * (model.lam[p] + 2.0 * model.mu[p])
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    dweight = compute_dweight(model, w, dw, i, j, k)
-                    wp.atomic_add(
-                        grid_stiffness,
-                        ix,
-                        iy,
-                        iz,
-                        stiffness * wp.dot(dweight, dweight),
-                    )
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+            )
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
+            dw = wp.mat33(
+                fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5)
+            )
+            stiffness = state.particle_vol[p] * (model.lam[p] + 2.0 * model.mu[p])
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        dweight = compute_dweight(model, w, dw, i, j, k)
+                        wp.atomic_add(
+                            grid_stiffness,
+                            ix,
+                            iy,
+                            iz,
+                            stiffness * wp.dot(dweight, dweight),
+                        )
 
 
 @wp.kernel
@@ -1146,40 +1304,43 @@ def implicit_accumulate_internal_force(
 ):
     p = wp.tid()
     if state.particle_selection[p] == 0:
-        grid_pos = state.particle_x[p] * model.inv_dx
+        particle_x = state.particle_x[p]
+        clamped_x = particle_x
+        grid_pos = clamped_x * model.inv_dx
         base_pos_x = wp.int(grid_pos[0] - 0.5)
         base_pos_y = wp.int(grid_pos[1] - 0.5)
         base_pos_z = wp.int(grid_pos[2] - 0.5)
         if not mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
-            state.particle_x[p] = mpm_clamp_to_grid_domain(state.particle_x[p], model)
-            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
-            state.particle_C[p] = mpm_zero_mat33()
-            grid_pos = state.particle_x[p] * model.inv_dx
+            clamped_x = mpm_clamp_to_grid_domain(particle_x, model)
+            grid_pos = clamped_x * model.inv_dx
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
-        dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
-        stress = trial_stress[p]
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    dweight = compute_dweight(model, w, dw, i, j, k)
-                    force = -state.particle_vol[p] * stress * dweight
-                    wp.atomic_add(grid_force, ix, iy, iz, force)
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+            )
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
+            dw = wp.mat33(
+                fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5)
+            )
+            stress = trial_stress[p]
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        dweight = compute_dweight(model, w, dw, i, j, k)
+                        force = -state.particle_vol[p] * stress * dweight
+                        wp.atomic_add(grid_force, ix, iy, iz, force)
 
 
 @wp.kernel
@@ -1189,6 +1350,7 @@ def implicit_finalize_residual(
     grid_du: wp.array(dtype=wp.vec3, ndim=3),
     grid_vn: wp.array(dtype=wp.vec3, ndim=3),
     grid_an: wp.array(dtype=wp.vec3, ndim=3),
+    grid_v_trial: wp.array(dtype=wp.vec3, ndim=3),
     grid_force: wp.array(dtype=wp.vec3, ndim=3),
     grid_residual: wp.array(dtype=wp.vec3, ndim=3),
     gamma: float,
@@ -1199,10 +1361,7 @@ def implicit_finalize_residual(
     if mass > 1e-15:
         v_n = grid_vn[grid_x, grid_y, grid_z]
         a_n = grid_an[grid_x, grid_y, grid_z]
-        # Use the current trial velocity so grid velocity overwrites are
-        # reflected in the residual evaluation. On unconstrained nodes this is
-        # algebraically equivalent to Eq. (8) through the Newmark relation.
-        v_np1 = state.grid_v_out[grid_x, grid_y, grid_z]
+        v_np1 = grid_v_trial[grid_x, grid_y, grid_z]
         a_np1 = (
             v_np1 - v_n - dt * (1.0 - gamma) * a_n
         ) * (1.0 / (gamma * dt))
@@ -1236,68 +1395,69 @@ def g2p_implicit(
             base_pos_x = wp.int(grid_pos[0] - 0.5)
             base_pos_y = wp.int(grid_pos[1] - 0.5)
             base_pos_z = wp.int(grid_pos[2] - 0.5)
-        fx = grid_pos - wp.vec3(
-            wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
-        )
-        wa = wp.vec3(1.5) - fx
-        wb = fx - wp.vec3(1.0)
-        wc = fx - wp.vec3(0.5)
-        w = wp.mat33(
-            wp.cw_mul(wa, wa) * 0.5,
-            wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-            wp.cw_mul(wc, wc) * 0.5,
-        )
-        dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
-        new_v = wp.vec3(0.0, 0.0, 0.0)
-        new_du = wp.vec3(0.0, 0.0, 0.0)
-        new_C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        grad_v = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        for i in range(0, 3):
-            for j in range(0, 3):
-                for k in range(0, 3):
-                    ix = base_pos_x + i
-                    iy = base_pos_y + j
-                    iz = base_pos_z + k
-                    dpos = wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
-                    weight = w[0, i] * w[1, j] * w[2, k]
-                    grid_v = state.grid_v_out[ix, iy, iz]
-                    grid_delta = grid_du[ix, iy, iz]
-                    new_v = new_v + grid_v * weight
-                    new_du = new_du + grid_delta * weight
-                    new_C = new_C + wp.outer(grid_v, dpos) * (
-                        weight * model.inv_dx * 4.0
-                    )
-                    dweight = compute_dweight(model, w, dw, i, j, k)
-                    grad_v = grad_v + wp.outer(grid_v, dweight)
-
-        new_x = state.particle_x[p] + new_du
-        new_grid_pos = new_x * model.inv_dx
-        new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
-        new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
-        new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
-        if not mpm_stencil_in_grid(
-            new_base_pos_x, new_base_pos_y, new_base_pos_z, model
-        ):
-            new_x = mpm_clamp_to_grid_domain(new_x, model)
+        if mpm_stencil_in_grid(base_pos_x, base_pos_y, base_pos_z, model):
+            fx = grid_pos - wp.vec3(
+                wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+            )
+            wa = wp.vec3(1.5) - fx
+            wb = fx - wp.vec3(1.0)
+            wc = fx - wp.vec3(0.5)
+            w = wp.mat33(
+                wp.cw_mul(wa, wa) * 0.5,
+                wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
+                wp.cw_mul(wc, wc) * 0.5,
+            )
+            dw = wp.mat33(fx - wp.vec3(1.5), -2.0 * (fx - wp.vec3(1.0)), fx - wp.vec3(0.5))
             new_v = wp.vec3(0.0, 0.0, 0.0)
             new_du = wp.vec3(0.0, 0.0, 0.0)
-            new_C = mpm_zero_mat33()
-            grad_v = mpm_zero_mat33()
-        state.particle_v[p] = new_v
-        state.particle_x[p] = new_x
-        state.particle_C[p] = new_C
-        I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        state.particle_F_trial[p] = (I33 + grad_v * dt) * state.particle_F[p]
+            new_C = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            grad_v = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            for i in range(0, 3):
+                for j in range(0, 3):
+                    for k in range(0, 3):
+                        ix = base_pos_x + i
+                        iy = base_pos_y + j
+                        iz = base_pos_z + k
+                        dpos = wp.vec3(wp.float(i), wp.float(j), wp.float(k)) - fx
+                        weight = w[0, i] * w[1, j] * w[2, k]
+                        grid_v = state.grid_v_out[ix, iy, iz]
+                        grid_delta = grid_du[ix, iy, iz]
+                        new_v = new_v + grid_v * weight
+                        new_du = new_du + grid_delta * weight
+                        new_C = new_C + wp.outer(grid_v, dpos) * (
+                            weight * model.inv_dx * 4.0
+                        )
+                        dweight = compute_dweight(model, w, dw, i, j, k)
+                        grad_v = grad_v + wp.outer(grid_v, dweight)
 
-        if model.update_cov_with_F:
-            update_cov(state, p, grad_v, dt)
+            new_x = state.particle_x[p] + new_du
+            new_grid_pos = new_x * model.inv_dx
+            new_base_pos_x = wp.int(new_grid_pos[0] - 0.5)
+            new_base_pos_y = wp.int(new_grid_pos[1] - 0.5)
+            new_base_pos_z = wp.int(new_grid_pos[2] - 0.5)
+            if not mpm_stencil_in_grid(
+                new_base_pos_x, new_base_pos_y, new_base_pos_z, model
+            ):
+                new_x = mpm_clamp_to_grid_domain(new_x, model)
+                new_v = wp.vec3(0.0, 0.0, 0.0)
+                new_du = wp.vec3(0.0, 0.0, 0.0)
+                new_C = mpm_zero_mat33()
+                grad_v = mpm_zero_mat33()
+            state.particle_v[p] = new_v
+            state.particle_x[p] = new_x
+            state.particle_C[p] = new_C
+            I33 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+            state.particle_F_trial[p] = (I33 + grad_v * dt) * state.particle_F[p]
+
+            if model.update_cov_with_F:
+                update_cov(state, p, grad_v, dt)
 
 
 @wp.kernel
 def compute_cov_from_F(state: MPMStateStruct, model: MPMModelStruct):
     p = wp.tid()
 
-    F = state.particle_F_trial[p]
+    F = state.particle_F[p]
 
     init_cov = wp.mat33(0.0)
     init_cov[0, 0] = state.particle_init_cov[p * 6]
@@ -1324,7 +1484,7 @@ def compute_cov_from_F(state: MPMStateStruct, model: MPMModelStruct):
 def compute_R_from_F(state: MPMStateStruct, model: MPMModelStruct):
     p = wp.tid()
 
-    F = state.particle_F_trial[p]
+    F = state.particle_F[p]
 
     # polar svd decomposition
     U = wp.mat33(0.0)
@@ -1348,14 +1508,6 @@ def compute_R_from_F(state: MPMStateStruct, model: MPMModelStruct):
 
 
 @wp.kernel
-def add_damping_via_grid(state: MPMStateStruct, scale: float):
-    grid_x, grid_y, grid_z = wp.tid()
-    state.grid_v_out[grid_x, grid_y, grid_z] = (
-        state.grid_v_out[grid_x, grid_y, grid_z] * scale
-    )
-
-
-@wp.kernel
 def apply_additional_params(
     state: MPMStateStruct,
     model: MPMModelStruct,
@@ -1374,6 +1526,8 @@ def apply_additional_params(
         model.E[p] = params_modifier.E
         model.nu[p] = params_modifier.nu
         state.particle_density[p] = params_modifier.density
+        if params_modifier.yield_stress >= 0.0:
+            model.yield_stress[p] = params_modifier.yield_stress
 
 
 @wp.kernel
@@ -1427,44 +1581,3 @@ def selection_enforce_particle_velocity_cylinder(
         velocity_modifier.mask[p] = 1
     else:
         velocity_modifier.mask[p] = 0
-
-
-@wp.kernel
-def apply_fixed_particle_indices(
-    time: float,
-    state: MPMStateStruct,
-    modifier: FixedParticleModifier,
-):
-    tid = wp.tid()
-    p = modifier.indices[tid]
-    motion_time = wp.min(
-        wp.max(time - modifier.start_time, 0.0),
-        wp.max(modifier.end_time - modifier.start_time, 0.0),
-    )
-    target_x = modifier.rest_x[tid] + modifier.velocity * motion_time
-    active_velocity = wp.vec3(0.0, 0.0, 0.0)
-    if time >= modifier.start_time and time < modifier.end_time:
-        active_velocity = modifier.velocity
-
-    state.particle_x[p] = target_x
-    state.particle_v[p] = active_velocity
-    state.particle_C[p] = wp.mat33(
-        0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0,
-    )
-    if modifier.reset_deformation == 1:
-        identity = wp.mat33(
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0,
-        )
-        zero = wp.mat33(
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-        )
-        state.particle_F[p] = identity
-        state.particle_F_trial[p] = identity
-        state.particle_R[p] = identity
-        state.particle_stress[p] = zero

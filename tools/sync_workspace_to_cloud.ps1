@@ -41,7 +41,7 @@ Write-Host "Backup: $backup"
 
 Run-Step "Create cloud backup" {
     $commands = @(
-        "mkdir -p '$backup/server' '$backup/supersplat-src-patched/src/ui/scss' '$backup/src/physgaussian-src/mpm_solver_warp'",
+        "mkdir -p '$backup/server' '$backup/supersplat-src-patched/src/ui/scss' '$backup/src/physgaussian-src/mpm_solver_warp' '$backup/src/physgaussian-src/utils'",
         "cp '$($manifest.cloudRoot)/server/phys_backend.py' '$backup/server/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/ui/bottom-toolbar.ts' '$backup/supersplat-src-patched/src/ui/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/ui/physics-panel.ts' '$backup/supersplat-src-patched/src/ui/' 2>/dev/null || true",
@@ -49,8 +49,12 @@ Run-Step "Create cloud backup" {
         "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/editor.ts' '$backup/supersplat-src-patched/src/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/physics-session.ts' '$backup/supersplat-src-patched/src/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/phys-motion.ts' '$backup/supersplat-src-patched/src/' 2>/dev/null || true",
+        "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/phys-motion-worker.ts' '$backup/supersplat-src-patched/src/' 2>/dev/null || true",
+        "cp '$($manifest.cloudRoot)/supersplat-src-patched/src/splat.ts' '$backup/supersplat-src-patched/src/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/src/physgaussian-src/mpm_solver_warp/mpm_solver_warp.py' '$backup/src/physgaussian-src/mpm_solver_warp/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/src/physgaussian-src/mpm_solver_warp/mpm_utils.py' '$backup/src/physgaussian-src/mpm_solver_warp/' 2>/dev/null || true",
+        "cp '$($manifest.cloudRoot)/src/physgaussian-src/mpm_solver_warp/warp_utils.py' '$backup/src/physgaussian-src/mpm_solver_warp/' 2>/dev/null || true",
+        "cp '$($manifest.cloudRoot)/src/physgaussian-src/utils/decode_param.py' '$backup/src/physgaussian-src/utils/' 2>/dev/null || true",
         "cp '$($manifest.cloudRoot)/src/physgaussian-src/gs_simulation.py' '$backup/src/physgaussian-src/' 2>/dev/null || true",
         "tar -czf '$backup/supersplat-dist.tar.gz' -C '$($manifest.cloudDist)' . 2>/dev/null || true"
     ) -join "; "

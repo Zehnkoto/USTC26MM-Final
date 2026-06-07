@@ -34,7 +34,9 @@ const motionGroupQuat = new Quat();
 const motionRestInv = new Mat4();
 const motionGroupTRS = new Mat4();
 const motionGroupTransform = new Mat4();
-const motionPatchTexturesEnabled = new URLSearchParams(window.location.search).get('physMotionPatchTextures')?.toLowerCase() === 'on';
+const motionPatchTexturesParam = new URLSearchParams(window.location.search).get('physMotionPatchTextures')?.toLowerCase();
+const motionPatchTexturesEnabled = motionPatchTexturesParam !== 'off';
+const motionProfileEnabled = new URLSearchParams(window.location.search).get('physMotionProfile')?.toLowerCase() === 'on';
 
 type MotionProxyPaletteFrame = {
     paletteStart: number;
@@ -57,6 +59,44 @@ type MotionFrameData = {
     proxyPalette?: MotionProxyPaletteFrame;
     updateBounds?: boolean;
     refreshSorterMapping?: boolean;
+};
+
+type MotionPreparedRow = {
+    y: number;
+    height: number;
+    data: Uint16Array | Uint32Array;
+};
+
+type MotionPreparedFrame = {
+    frame: number;
+    transformARows: MotionPreparedRow[];
+    transformBRows: MotionPreparedRow[];
+    centers?: Float32Array;
+    bounds?: { min: [number, number, number]; max: [number, number, number] };
+    bytes: number;
+    pinned?: boolean;
+    timings?: Record<string, number>;
+    stats?: {
+        frame: number;
+        trackedCount: number;
+        touchedRowCount: number;
+        textureHeight: number;
+        rowRangeCount: number;
+        transformABytes: number;
+        transformBBytes: number;
+        centersBytes: number;
+        totalBytes: number;
+        decodeMs: number;
+        packMs: number;
+        touchedRowRatio: number;
+    };
+};
+
+type MotionTextureSnapshot = {
+    textureWidth: number;
+    textureHeight: number;
+    baseTransformA: ArrayBuffer;
+    baseTransformB: ArrayBuffer;
 };
 
 const uploadMotionRows = async (
@@ -92,6 +132,32 @@ const uploadMotionRows = async (
         return true;
     }
     return false;
+};
+
+const uploadPreparedRows = async (
+    texture: Texture,
+    rows: MotionPreparedRow[]
+) => {
+    if (!(texture as any).impl?.write) {
+        return false;
+    }
+
+    let uploaded = false;
+    for (const row of rows) {
+        const height = Math.max(row.height, 1);
+        const width = Math.floor(row.data.length / height / 4);
+        if (width <= 0) {
+            continue;
+        }
+        try {
+            await Promise.resolve(texture.write(0, row.y, width, row.height, row.data));
+            uploaded = true;
+        } catch (error) {
+            console.warn('[physmotion] prepared texture row upload failed', { y: row.y, height: row.height, width }, error);
+            return false;
+        }
+    }
+    return uploaded;
 };
 
 const boundingPoints =
@@ -307,11 +373,111 @@ class Splat extends Element {
         await this.updateLocalBounds();
     }
 
+    getMotionTextureSnapshot(): MotionTextureSnapshot | null {
+        const resource = this.asset.resource as GSplatResource;
+        const transformA = resource.getTexture('transformA');
+        const transformB = resource.getTexture('transformB');
+        if (!motionPatchTexturesEnabled || !transformA || !transformB || !(transformA as any).impl?.write || !(transformB as any).impl?.write) {
+            return null;
+        }
+
+        const transformAData = transformA.getSource() as unknown as Uint32Array;
+        const transformBData = transformB.getSource() as unknown as Uint16Array;
+        if (!transformAData || !transformBData) {
+            return null;
+        }
+
+        return {
+            textureWidth: resource.textureDimensions.x,
+            textureHeight: resource.textureDimensions.y,
+            // TODO: avoid full transform texture snapshots; send only touched rows for dynamic splats.
+            baseTransformA: new Uint32Array(transformAData).buffer,
+            baseTransformB: new Uint16Array(transformBData).buffer
+        };
+    }
+
+    async applyPreparedMotionFrame(frame: MotionPreparedFrame, indices?: Uint32Array) {
+        const resource = this.asset.resource as GSplatResource;
+        const sorter = this.entity.gsplat.instance.sorter;
+        const transformA = resource.getTexture('transformA');
+        const transformB = resource.getTexture('transformB');
+        const start = motionProfileEnabled ? performance.now() : 0;
+
+        const uploadedA = transformA && frame.transformARows.length > 0
+            ? await uploadPreparedRows(transformA, frame.transformARows)
+            : true;
+        const uploadedB = transformB && frame.transformBRows.length > 0
+            ? await uploadPreparedRows(transformB, frame.transformBRows)
+            : true;
+
+        if (!uploadedA || !uploadedB) {
+            return false;
+        }
+
+        if (frame.centers) {
+            const centers = sorter.centers as Float32Array;
+            const count = indices ? indices.length : Math.min(this.splatData.numSplats, frame.centers.length / 3);
+            for (let i = 0; i < count; ++i) {
+                const id = indices ? indices[i] : i;
+                const src = i * 3;
+                const dst = id * 3;
+                centers[dst] = frame.centers[src];
+                centers[dst + 1] = frame.centers[src + 1];
+                centers[dst + 2] = frame.centers[src + 2];
+                resource.centers[dst] = frame.centers[src];
+                resource.centers[dst + 1] = frame.centers[src + 1];
+                resource.centers[dst + 2] = frame.centers[src + 2];
+            }
+        }
+        if (frame.bounds && !indices) {
+            motionMin.set(frame.bounds.min[0], frame.bounds.min[1], frame.bounds.min[2]);
+            motionMax.set(frame.bounds.max[0], frame.bounds.max[1], frame.bounds.max[2]);
+            this.localBoundStorage.setMinMax(motionMin, motionMax);
+            this.updateWorldBound();
+        }
+
+        this.changedCounter++;
+        this.scene.forceRender = true;
+        this.scene.events.fire('splat.motionFrameApplied', this);
+
+        if (motionProfileEnabled) {
+            console.table({
+                frame: frame.frame,
+                preparedBytesMB: +(frame.bytes / 1024 / 1024).toFixed(2),
+                uploadAndCentersMs: +(performance.now() - start).toFixed(2),
+                workerDecodeMs: frame.timings?.decode ?? 0,
+                workerPackMs: frame.timings?.pack ?? 0,
+                touchedRows: frame.stats ? `${frame.stats.touchedRowCount}/${frame.stats.textureHeight}` : '',
+                touchedRatio: frame.stats ? +frame.stats.touchedRowRatio.toFixed(3) : 0,
+                rowRanges: frame.stats?.rowRangeCount ?? 0
+            });
+        }
+
+        return true;
+    }
+
     async applyMotionFrame(frame: MotionFrameData) {
         if (frame.proxyPalette) {
             this.applyMotionProxyPaletteFrame(frame.proxyPalette);
             return;
         }
+
+        const profile = motionProfileEnabled ? {
+            frame: -1,
+            start: performance.now(),
+            validate: 0,
+            positionLoop: 0,
+            centerSync: 0,
+            rotationLoop: 0,
+            scaleLoop: 0,
+            textureUpload: 0,
+            fallbackUpload: 0
+        } : null;
+        const mark = (key: string, start: number) => {
+            if (profile) {
+                (profile as any)[key] += performance.now() - start;
+            }
+        };
 
         const { positions, rotations, scales, indices } = frame;
         const splatData = this.splatData;
@@ -325,6 +491,9 @@ class Splat extends Element {
         }
         if (scales && scales.length < count * 3) {
             throw new Error(`motion scales buffer is too small: expected ${count * 3}, got ${scales.length}`);
+        }
+        if (profile) {
+            profile.validate = performance.now() - profile.start;
         }
 
         const resource = this.asset.resource as GSplatResource;
@@ -341,6 +510,7 @@ class Splat extends Element {
         const touchedRows = canPatchTransformTextures ? new Uint8Array(textureHeight) : null;
 
         if (positions) {
+            const positionStart = performance.now();
             const x = splatData.getProp('x') as Float32Array;
             const y = splatData.getProp('y') as Float32Array;
             const z = splatData.getProp('z') as Float32Array;
@@ -377,9 +547,11 @@ class Splat extends Element {
                 motionMax.y = Math.max(motionMax.y, py);
                 motionMax.z = Math.max(motionMax.z, pz);
             }
+            mark('positionLoop', positionStart);
 
             // Keep the resource-side cache in sync for consumers that do not read the sorter copy.
             // Indexed motion packages only touch a subset, so avoid copying the whole scene every frame.
+            const centerStart = performance.now();
             if (indices) {
                 for (let i = 0; i < count; ++i) {
                     const id = indices[i] * 3;
@@ -391,9 +563,11 @@ class Splat extends Element {
             } else {
                 resource.centers.set(centers);
             }
+            mark('centerSync', centerStart);
         }
 
         if (rotations) {
+            const rotationStart = performance.now();
             const r0 = splatData.getProp('rot_0') as Float32Array;
             const r1 = splatData.getProp('rot_1') as Float32Array;
             const r2 = splatData.getProp('rot_2') as Float32Array;
@@ -428,9 +602,11 @@ class Splat extends Element {
                     touchedRows[Math.floor(id / textureWidth)] = 1;
                 }
             }
+            mark('rotationLoop', rotationStart);
         }
 
         if (scales) {
+            const scaleStart = performance.now();
             const s0 = splatData.getProp('scale_0') as Float32Array;
             const s1 = splatData.getProp('scale_1') as Float32Array;
             const s2 = splatData.getProp('scale_2') as Float32Array;
@@ -448,14 +624,19 @@ class Splat extends Element {
                     touchedRows[Math.floor(id / textureWidth)] = 1;
                 }
             }
+            mark('scaleLoop', scaleStart);
         }
 
+        const uploadStart = performance.now();
         const patchedTransformTextures = transformAData && transformBData && touchedRows
             ? (await uploadMotionRows(transformA, transformAData, touchedRows, textureWidth, 4))
                 && (await uploadMotionRows(transformB, transformBData, touchedRows, textureWidth, 4))
             : false;
+        mark('textureUpload', uploadStart);
         if (!patchedTransformTextures) {
+            const fallbackStart = performance.now();
             resource.updateTransformData(splatData);
+            mark('fallbackUpload', fallbackStart);
         }
         if (frame.refreshSorterMapping) {
             sorter.setMapping(null);
@@ -469,6 +650,21 @@ class Splat extends Element {
         this.changedCounter++;
         this.scene.forceRender = true;
         this.scene.events.fire('splat.motionFrameApplied', this);
+
+        if (profile) {
+            console.table({
+                validateMs: +profile.validate.toFixed(2),
+                positionLoopMs: +profile.positionLoop.toFixed(2),
+                centerSyncMs: +profile.centerSync.toFixed(2),
+                rotationLoopMs: +profile.rotationLoop.toFixed(2),
+                scaleLoopMs: +profile.scaleLoop.toFixed(2),
+                textureUploadMs: +profile.textureUpload.toFixed(2),
+                fallbackUploadMs: +profile.fallbackUpload.toFixed(2),
+                totalMs: +(performance.now() - profile.start).toFixed(2),
+                count,
+                patchTexture: !!patchedTransformTextures
+            });
+        }
     }
 
     setupMotionProxyPalette(indices: Uint32Array, groupIds: Uint32Array, groupCount: number): MotionProxyPaletteBinding {
@@ -502,7 +698,7 @@ class Splat extends Element {
         return { paletteStart, groupCount, previousTransformIndices };
     }
 
-    restoreMotionProxyPalette(indices: Uint32Array, previousTransformIndices: Uint16Array) {
+    restoreMotionProxyPalette(indices: Uint32Array, previousTransformIndices: Uint16Array, groupCount = 0) {
         if (!indices || !previousTransformIndices) {
             return;
         }
@@ -516,6 +712,9 @@ class Splat extends Element {
             }
         }
         this.transformTexture.unlock();
+        if (groupCount > 0) {
+            this.transformPalette.free(groupCount);
+        }
         this.scene.forceRender = true;
     }
 
@@ -872,3 +1071,4 @@ class Splat extends Element {
 }
 
 export { Splat };
+export type { MotionPreparedFrame, MotionTextureSnapshot };

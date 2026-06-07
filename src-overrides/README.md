@@ -1,27 +1,19 @@
 # Source Overrides
 
-This directory contains the project-specific source changes that must be copied
-over the upstream repositories during a full deployment.
+The folders here contain project-owned overlay files for upstream repositories.
+They are intentionally stored as partial trees, not full third-party checkouts.
 
-The repository intentionally does not vendor complete copies of SuperSplat or
-PhysGaussian. Clone those upstream projects first, then overlay these files:
+## Folders
 
-- `src-overrides/supersplat-src/` -> `supersplat-src/`
-- `src-overrides/physgaussian-src/` -> `physgaussian-src/`
+- `supersplat-src/`: files to copy into the upstream SuperSplat `src/` folder.
+- `physgaussian-src/`: files to copy into the upstream PhysGaussian repository
+  root.
 
-On Linux/macOS:
+## Sync
 
 ```bash
-rsync -a src-overrides/supersplat-src/ ../supersplat-src/
-rsync -a src-overrides/physgaussian-src/ ../physgaussian-src/
+rsync -av src-overrides/supersplat-src/ external/supersplat/src/
+rsync -av src-overrides/physgaussian-src/ external/PhysGaussian/
 ```
 
-On Windows PowerShell:
-
-```powershell
-Copy-Item -Recurse -Force .\src-overrides\supersplat-src\* ..\supersplat-src\
-Copy-Item -Recurse -Force .\src-overrides\physgaussian-src\* ..\physgaussian-src\
-```
-
-Keep generated outputs, trained models, logs, and simulation binaries outside
-this directory.
+Review `docs/EXTERNAL_LIBS.md` before uploading or publishing patches.

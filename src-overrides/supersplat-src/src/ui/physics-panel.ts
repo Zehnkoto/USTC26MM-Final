@@ -16,6 +16,8 @@ const materialOptions: { v: MaterialPreset, t: string }[] = [
     { v: 'obstacle', t: '固定锚点' }
 ];
 
+materialOptions.find(option => option.v === 'obstacle')!.t = 'Grid velocity cuboid';
+
 const materialDensityDefaults: Record<MaterialPreset, number> = {
     jelly: 200,
     metal: 2700,
@@ -50,18 +52,23 @@ const formatPayload = (payload: PhysicsPayload) => JSON.stringify({
     officialConfig: payload.officialConfig,
     preprocessing: payload.preprocessing,
     simulation: payload.simulation,
+    boundaryConstraints: payload.boundaryConstraints,
     objects: payload.objects.map(object => ({
         objectId: object.objectId,
         bodyId: object.bodyId,
         name: object.name,
         material: object.material,
         mode: object.mode,
+        constraintMode: object.constraintMode,
+        cuboidPaddingGridNodes: object.cuboidPaddingGridNodes,
         fill: object.fill,
         count: object.count,
         E: object.E,
         nu: object.nu,
         density: object.density,
-        drive: object.drive
+        drive: object.drive,
+        aabbWorld: object.aabbWorld,
+        boundaryDebug: object.boundaryDebug
     })),
     selectedCount: payload.selectedCount
 }, null, 2);
@@ -230,7 +237,7 @@ class PhysicsPanel extends Container {
         });
 
         const scale = numeric(1, 3, 0.01, 2);
-        const nGrid = numeric(100, 0, 16, 512);
+        const nGrid = numeric(50, 0, 16, 512);
         const opacity = numeric(0.02, 3, 0, 1);
         const simAreaLabel = new Label({ class: 'physics-muted', text: '仿真区：自动 / 选区AABB' });
         const voxelGroupInfo = new Label({ class: 'physics-muted', text: '体素分组：等待模型/Part' });
@@ -354,28 +361,13 @@ class PhysicsPanel extends Container {
         const frameDt = numeric(0.02, 4, 1e-4, 1);
         const frameNum = numeric(30, 0, 1, 10000);
         const substepDt = numeric(1e-4, 6, 1e-6, 1);
-        const implicitBeta = numeric(0.25, 4, 0, 1);
-        const implicitGamma = numeric(0.5, 4, 0, 1);
-        const newtonTol = numeric(1e-4, 8, 1e-10, 1);
-        const newtonAbsTol = numeric(1e-6, 10, 1e-12, 1);
-        const newtonMaxIter = numeric(8, 0, 1, 128);
-        const gmresTol = numeric(1e-3, 8, 1e-10, 1);
-        const gmresMaxIter = numeric(24, 0, 1, 512);
-        const jvpEps = numeric(1e-4, 8, 1e-10, 1);
-        const lineSearchMaxIter = numeric(8, 0, 0, 64);
-        const armijoC1 = numeric(1e-4, 8, 1e-10, 1);
-        const ewEtaMin = numeric(1e-5, 9, 1e-12, 1);
-        const ewEtaMax = numeric(0.5, 4, 1e-6, 1);
-        const ewGamma = numeric(0.9, 4, 0, 1);
-        const ewAlpha = numeric(1.5, 4, 0, 10);
-        const stiffnessPreconditionerScale = numeric(1.0, 4, 0, 100);
-        const stagnationTol = numeric(1e-8, 10, 1e-14, 1);
-        const pbmpmIterationCount = numeric(1, 0, 1, 16);
-        const pbmpmElasticityRatio = numeric(1.0, 4, 0, 1);
-        const pbmpmElasticRelaxation = numeric(1.5, 4, 0, 10);
-        const pbmpmPlasticity = numeric(0.0, 4, 0, 1);
-        const pbmpmYieldMin = numeric(0.55, 4, 0.01, 5);
-        const pbmpmYieldMax = numeric(1.85, 4, 0.01, 5);
+        const damping = numeric(0.9999, 4, 0, 1);
+        const implicitNewtonMaxIter = numeric(16, 0, 1, 128);
+        const pbmpmNMin = numeric(3, 0, 1, 256);
+        const pbmpmNMax = numeric(25, 0, 1, 512);
+        const pbmpmPlasticMode = numeric(0, 0, 0, 1);
+        const pbmpmYieldMin = numeric(0.55, 4, 0.01, 10);
+        const pbmpmYieldMax = numeric(1.85, 4, 0.01, 10);
         const timeWarning = new Label({ class: 'physics-warning', text: '' });
 
         const copyPayload = new Button({
@@ -437,27 +429,12 @@ class PhysicsPanel extends Container {
                 frame_dt: frameDt.value,
                 frame_num: frameNum.value,
                 substep_dt: substepDt.value,
-                implicitBeta: implicitBeta.value,
-                implicitGamma: implicitGamma.value,
-                newtonTol: newtonTol.value,
-                newtonAbsTol: newtonAbsTol.value,
-                newtonMaxIter: newtonMaxIter.value,
-                gmresTol: gmresTol.value,
-                gmresMaxIter: gmresMaxIter.value,
-                jvpEps: jvpEps.value,
-                lineSearchMaxIter: lineSearchMaxIter.value,
-                armijoC1: armijoC1.value,
-                ewEtaMin: ewEtaMin.value,
-                ewEtaMax: ewEtaMax.value,
-                ewGamma: ewGamma.value,
-                ewAlpha: ewAlpha.value,
-                stiffnessPreconditionerScale: stiffnessPreconditionerScale.value,
-                stagnationTol: stagnationTol.value,
+                damping: damping.value,
+                newtonMaxIter: implicitNewtonMaxIter.value,
                 pbmpm: {
-                    iteration_count: pbmpmIterationCount.value,
-                    elasticity_ratio: pbmpmElasticityRatio.value,
-                    elastic_relaxation: pbmpmElasticRelaxation.value,
-                    plasticity: pbmpmPlasticity.value,
+                    n_min: pbmpmNMin.value,
+                    n_max: pbmpmNMax.value,
+                    plastic_mode: pbmpmPlasticMode.value,
                     yield_min: pbmpmYieldMin.value,
                     yield_max: pbmpmYieldMax.value
                 }
@@ -586,6 +563,29 @@ class PhysicsPanel extends Container {
 
             syncingOfficialUi = true;
             const currentSimulation: Partial<PhysicsPayload['simulation']> = payload.simulation ?? {};
+            if (currentSimulation.frame_dt !== undefined) {
+                frameDt.value = currentSimulation.frame_dt;
+            }
+            if (currentSimulation.frame_num !== undefined) {
+                frameNum.value = currentSimulation.frame_num;
+            }
+            if (currentSimulation.substep_dt !== undefined) {
+                substepDt.value = currentSimulation.substep_dt;
+            }
+            if (currentSimulation.damping !== undefined) {
+                damping.value = currentSimulation.damping;
+            }
+            if (currentSimulation.newtonMaxIter !== undefined) {
+                implicitNewtonMaxIter.value = currentSimulation.newtonMaxIter;
+            }
+            if (currentSimulation.pbmpm) {
+                if (currentSimulation.pbmpm.n_min !== undefined) pbmpmNMin.value = currentSimulation.pbmpm.n_min;
+                if (currentSimulation.pbmpm.n_max !== undefined) pbmpmNMax.value = currentSimulation.pbmpm.n_max;
+                if (currentSimulation.pbmpm.plastic_mode !== undefined) pbmpmPlasticMode.value = currentSimulation.pbmpm.plastic_mode;
+                if (currentSimulation.pbmpm.yield_min !== undefined) pbmpmYieldMin.value = currentSimulation.pbmpm.yield_min;
+                if (currentSimulation.pbmpm.yield_max !== undefined) pbmpmYieldMax.value = currentSimulation.pbmpm.yield_max;
+            }
+            updateTimeWarning();
             if (Array.isArray(currentSimulation.gravity)) {
                 const g = currentSimulation.gravity;
                 gravityEnabled.value = !!currentSimulation.gravityEnabled;
@@ -659,26 +659,11 @@ class PhysicsPanel extends Container {
             frameDt,
             frameNum,
             substepDt,
-            implicitBeta,
-            implicitGamma,
-            newtonTol,
-            newtonAbsTol,
-            newtonMaxIter,
-            gmresTol,
-            gmresMaxIter,
-            jvpEps,
-            lineSearchMaxIter,
-            armijoC1,
-            ewEtaMin,
-            ewEtaMax,
-            ewGamma,
-            ewAlpha,
-            stiffnessPreconditionerScale,
-            stagnationTol,
-            pbmpmIterationCount,
-            pbmpmElasticityRatio,
-            pbmpmElasticRelaxation,
-            pbmpmPlasticity,
+            damping,
+            implicitNewtonMaxIter,
+            pbmpmNMin,
+            pbmpmNMax,
+            pbmpmPlasticMode,
             pbmpmYieldMin,
             pbmpmYieldMax
         ].forEach(input => input.on('change', () => {
@@ -1287,6 +1272,16 @@ class PhysicsPanel extends Container {
                 '仿真区：自动 / Body 并集';
             modelStatus.text = payload.modelId ? `预览模型：已同步 ${payload.modelId}` : '预览模型：未同步，请先用 SuperSplat 打开/拖入 PLY';
 
+            syncingOfficialUi = true;
+            implicitNewtonMaxIter.value = payload.simulation.newtonMaxIter ?? 16;
+            damping.value = payload.simulation.damping ?? 0.9999;
+            pbmpmNMin.value = payload.simulation.pbmpm?.n_min ?? 3;
+            pbmpmNMax.value = payload.simulation.pbmpm?.n_max ?? 25;
+            pbmpmPlasticMode.value = payload.simulation.pbmpm?.plastic_mode ?? 0;
+            pbmpmYieldMin.value = payload.simulation.pbmpm?.yield_min ?? 0.55;
+            pbmpmYieldMax.value = payload.simulation.pbmpm?.yield_max ?? 1.85;
+            syncingOfficialUi = false;
+
             const objectOptions = payload.objects.length ?
                 payload.objects.map(object => ({ v: object.objectId, t: `Part ${object.objectId}: ${object.name} / Body ${object.bodyId ?? object.objectId}` })) :
                 [{ v: '', t: '未选择 Part' }];
@@ -1346,35 +1341,20 @@ class PhysicsPanel extends Container {
         const solverFoldout = createFoldout('求解器', true);
         solverFoldout.body.append(solverHint);
         solverFoldout.body.append(solverList);
-        const implicitNewmarkFoldout = createFoldout('隐式 MPM / Newmark', true);
-        implicitNewmarkFoldout.body.append(createParamRow('beta', implicitBeta, 'Newmark 位置预测权重；越大越偏向隐式加速度修正。'));
-        implicitNewmarkFoldout.body.append(createParamRow('gamma', implicitGamma, 'Newmark 速度更新权重；影响隐式速度修正和数值阻尼。'));
-        const implicitNewtonFoldout = createFoldout('Newton / GMRES', false);
-        implicitNewtonFoldout.body.append(createParamRow('Newton 相对阈值', newtonTol, '非线性残差相对初值低于该比例时，当前子步视为收敛。'));
-        implicitNewtonFoldout.body.append(createParamRow('Newton 绝对阈值', newtonAbsTol, '残差足够小时直接停止，避免很小残差继续迭代。'));
-        implicitNewtonFoldout.body.append(createParamRow('Newton 最大迭代', newtonMaxIter, '每个子步最多执行的 Newton 外层迭代次数。'));
-        implicitNewtonFoldout.body.append(createParamRow('GMRES 基础阈值', gmresTol, '线性子问题的基础相对容差，会被 EW 自适应容差调度。'));
-        implicitNewtonFoldout.body.append(createParamRow('GMRES 最大迭代', gmresMaxIter, '每次 Newton 更新中 GMRES 线性求解的迭代上限。'));
-        implicitNewtonFoldout.body.append(createParamRow('JVP 扰动', jvpEps, '有限差分 Jacobian-vector product 的扰动尺度。'));
-        const implicitAdvancedFoldout = createFoldout('线搜索 / EW / 预条件', false);
-        implicitAdvancedFoldout.body.append(createParamRow('线搜索最大次数', lineSearchMaxIter, 'Newton 更新不够下降时，最多回退步长的次数。'));
-        implicitAdvancedFoldout.body.append(createParamRow('Armijo c1', armijoC1, '线搜索的充分下降系数；越小越容易接受更新。'));
-        implicitAdvancedFoldout.body.append(createParamRow('EW 最小阈值', ewEtaMin, 'Eisenstat-Walker 自适应 GMRES 容差下界。'));
-        implicitAdvancedFoldout.body.append(createParamRow('EW 最大阈值', ewEtaMax, 'Eisenstat-Walker 自适应 GMRES 容差上界。'));
-        implicitAdvancedFoldout.body.append(createParamRow('EW gamma', ewGamma, '控制 EW 容差随残差下降的收紧速度。'));
-        implicitAdvancedFoldout.body.append(createParamRow('EW alpha', ewAlpha, 'EW 容差更新的幂指数；越大通常收紧更激进。'));
-        implicitAdvancedFoldout.body.append(createParamRow('预条件刚度系数', stiffnessPreconditionerScale, '缩放刚度项预条件器，影响 GMRES 收敛速度。'));
-        implicitAdvancedFoldout.body.append(createParamRow('停滞阈值', stagnationTol, '残差改善低于该量时，判定当前 Newton 更新停滞。'));
+        const implicitInfo = new Label({
+            class: 'physics-param-help',
+            text: '隐式 MPM 使用 Newmark + Newton-GMRES + EW 默认设置；只需要在运行页调整帧间隔、帧数和子步长。'
+        });
+        const implicitFoldout = createFoldout('隐式 MPM', false);
+        implicitFoldout.body.append(createParamRow('Newton 最大迭代', implicitNewtonMaxIter, '每个 implicit substep 内 Newton 外层最多迭代次数；默认 16，增大更稳但更慢。'));
         const pbmpmFoldout = createFoldout('PBMPM Local-Global', false);
-        pbmpmFoldout.body.append(createParamRow('迭代次数', pbmpmIterationCount, '每个子步执行的 local-global 投影次数；越高约束越充分但更慢。'));
-        pbmpmFoldout.body.append(createParamRow('弹性比例', pbmpmElasticityRatio, 'vendor PBMPM 的 elasticity_ratio；控制弹性投影中的形变/体积耦合比例。'));
-        pbmpmFoldout.body.append(createParamRow('弹性松弛', pbmpmElasticRelaxation, 'vendor PBMPM 的 elastic_relaxation；控制每轮弹性校正推进幅度。'));
-        pbmpmFoldout.body.append(createParamRow('塑性强度', pbmpmPlasticity, '控制塑性投影混合强度；0 表示不启用塑性限制。'));
-        pbmpmFoldout.body.append(createParamRow('屈服下界', pbmpmYieldMin, '塑性奇异值夹取下界，限制压缩后的永久形变范围。'));
-        pbmpmFoldout.body.append(createParamRow('屈服上界', pbmpmYieldMax, '塑性奇异值夹取上界，限制拉伸后的永久形变范围。'));
-        solverFoldout.body.append(implicitNewmarkFoldout.root);
-        solverFoldout.body.append(implicitNewtonFoldout.root);
-        solverFoldout.body.append(implicitAdvancedFoldout.root);
+        pbmpmFoldout.body.append(createParamRow('N min', pbmpmNMin, 'PBMPM 自动映射 local/global 内步迭代下限；默认 3。'));
+        pbmpmFoldout.body.append(createParamRow('N max', pbmpmNMax, 'PBMPM 自动映射 local/global 内步迭代上限；默认 25。'));
+        pbmpmFoldout.body.append(createParamRow('Plastic mode', pbmpmPlasticMode, '0 使用显式/隐式 MPM 同源 material return mapping；1 使用 PBMPM stretch clamp。'));
+        pbmpmFoldout.body.append(createParamRow('Yield min', pbmpmYieldMin, 'PBMPM 主方向伸缩下界，不是 material yield_stress。'));
+        pbmpmFoldout.body.append(createParamRow('Yield max', pbmpmYieldMax, 'PBMPM 主方向伸缩上界，不是 material yield_stress。'));
+        solverFoldout.body.append(implicitInfo);
+        solverFoldout.body.append(implicitFoldout.root);
         solverFoldout.body.append(pbmpmFoldout.root);
 
         const environmentFoldout = createFoldout('环境 / 网格 / 归一化', true);
@@ -1441,6 +1421,7 @@ class PhysicsPanel extends Container {
         runFoldout.body.append(createRow('帧间隔', frameDt));
         runFoldout.body.append(createRow('帧数', frameNum));
         runFoldout.body.append(createRow('子步长', substepDt));
+        runFoldout.body.append(createParamRow('Damping', damping, '网格速度保留比例；1 表示不衰减，越小衰减越强。'));
         runFoldout.body.append(timeWarning);
         runFoldout.body.append(submit);
         runFoldout.body.append(cancel);

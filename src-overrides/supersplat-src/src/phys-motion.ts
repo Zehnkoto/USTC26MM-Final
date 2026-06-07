@@ -1,6 +1,7 @@
 import { Quat, Vec3 } from 'playcanvas';
 
 import { Splat } from './splat';
+import type { MotionPreparedFrame, MotionTextureSnapshot } from './splat';
 import { Events } from './events';
 import { Scene } from './scene';
 import { State } from './splat-state';
@@ -15,10 +16,11 @@ type ImportFile = {
 type PhysMotionAttribute = 'position' | 'rotation' | 'scale';
 
 type PhysMotionManifest = {
-    format?: 'phys-motion-v1';
+    format?: 'phys-motion-v1' | string;
     base?: string;
     binary: string;
     frameCount: number;
+    availableFrames?: number;
     frameRate?: number;
     numSplats: number;
     attributes?: PhysMotionAttribute[];
@@ -37,6 +39,7 @@ type PhysMotionManifest = {
 
 type PhysMotionTrack = {
     manifest: PhysMotionManifest;
+    disposed: boolean;
     binary?: ArrayBuffer;
     binaryUrl?: string;
     indices?: Uint32Array;
@@ -64,9 +67,20 @@ type PhysMotionTrack = {
     requestedFrame: number;
     appliedFrame: number;
     droppedFrames: number;
+    availableFrames: number;
+    preparedClient?: MotionWorkerClient;
+    preparedFrameCache: Map<number, Promise<MotionPreparedFrame | null> | MotionPreparedFrame | null>;
+    preparedCacheBudgetBytes: number;
+    preparedBytesEstimate: number;
+    preparedRequestMsEstimate: number;
+    preparedApplyMsEstimate: number;
+    preparedWarmupCompleted: boolean;
+    preparedWarmupStatusFrameCount: number;
+    streamPreviewFrameRate?: number;
 };
 
 const manifestNames = ['.physmotion.json', 'phys_motion.json'];
+const bytesPerMiB = 1024 * 1024;
 const proxyScratchQuat = new Quat();
 const proxyBaseQuat = new Quat();
 const proxyBlendQuat = new Quat();
@@ -74,6 +88,16 @@ const proxyPoint = new Vec3();
 const proxyLocal = new Vec3();
 const proxyRotated = new Vec3();
 const proxyTmpVec = new Vec3();
+const motionPrewarmParam = new URLSearchParams(window.location.search).get('physMotionPrewarm')?.toLowerCase();
+const motionPrewarmEnabled = motionPrewarmParam !== 'off' && motionPrewarmParam !== '0' && motionPrewarmParam !== 'false';
+const motionProfileEnabled = new URLSearchParams(window.location.search).get('physMotionProfile')?.toLowerCase() === 'on';
+const motionPrewarmMaxFrames = Math.max(
+    1,
+    Math.min(
+        240,
+        Math.floor(Number(new URLSearchParams(window.location.search).get('physMotionPrewarmMaxFrames')) || 60)
+    )
+);
 
 const isPhysMotionManifest = (filename: string) => {
     const lower = filename.toLowerCase();
@@ -98,6 +122,7 @@ const readArrayBuffer = async (file: ImportFile) => {
 };
 
 const readUrlRange = async (url: string, start: number, endExclusive: number) => {
+    const expected = endExclusive - start;
     const response = await fetch(url, {
         headers: {
             Range: `bytes=${start}-${endExclusive - 1}`
@@ -108,12 +133,15 @@ const readUrlRange = async (url: string, start: number, endExclusive: number) =>
     }
     const buffer = await response.arrayBuffer();
     if (response.status === 206) {
+        if (buffer.byteLength !== expected) {
+            throw new Error(`range size mismatch: expected ${expected} bytes, got ${buffer.byteLength}`);
+        }
         return buffer;
     }
-
-    // Fallback for servers that ignore Range. This still works, but it costs one
-    // full download; our FastAPI StaticFiles path supports 206 in the cloud.
-    return buffer.slice(start, endExclusive);
+    if (response.status === 200 && buffer.byteLength === expected) {
+        return buffer;
+    }
+    throw new Error(`server ignored Range request: expected ${expected} bytes, got ${buffer.byteLength}; refusing to load full motion file`);
 };
 
 const readText = async (file: ImportFile) => {
@@ -163,6 +191,110 @@ const proxyPaletteMode = () => {
     return 'auto';
 };
 
+class MotionWorkerClient {
+    private worker: Worker;
+    private nextId = 1;
+    private pending = new Map<number, {
+        resolve: (value: MotionPreparedFrame | null) => void;
+        reject: (error: Error) => void;
+    }>();
+
+    constructor() {
+        this.worker = new Worker(new URL('./phys-motion-worker.js', import.meta.url), { type: 'module' });
+        this.worker.onmessage = (event: MessageEvent<any>) => {
+            const message = event.data;
+            if (message.type === 'prepared') {
+                const pending = this.pending.get(message.id);
+                if (pending) {
+                    this.pending.delete(message.id);
+                    pending.resolve(message.prepared as MotionPreparedFrame);
+                }
+            } else if (message.type === 'missing') {
+                const pending = this.pending.get(message.id);
+                if (pending) {
+                    this.pending.delete(message.id);
+                    pending.resolve(null);
+                }
+            } else if (message.type === 'error') {
+                const pending = this.pending.get(message.id);
+                if (pending) {
+                    this.pending.delete(message.id);
+                    pending.reject(new Error(message.message));
+                }
+            }
+        };
+        this.worker.onerror = (event) => {
+            const message = event.message || 'motion worker failed';
+            for (const pending of this.pending.values()) {
+                pending.reject(new Error(message));
+            }
+            this.pending.clear();
+        };
+    }
+
+    init(payload: {
+        binaryUrl: string;
+        frameCount: number;
+        availableFrames: number;
+        numSplats: number;
+        attributes: PhysMotionAttribute[];
+        frameStrideBytes: number;
+        chunkFrameCount: number;
+        textureSnapshot: MotionTextureSnapshot;
+        indices?: Uint32Array;
+    }) {
+        const transfers: Transferable[] = [
+            payload.textureSnapshot.baseTransformA,
+            payload.textureSnapshot.baseTransformB
+        ];
+        let indices: ArrayBuffer | undefined;
+        if (payload.indices) {
+            indices = new Uint32Array(payload.indices).buffer;
+            transfers.push(indices);
+        }
+        this.worker.postMessage({
+            type: 'init',
+            binaryUrl: payload.binaryUrl,
+            frameCount: payload.frameCount,
+            availableFrames: payload.availableFrames,
+            numSplats: payload.numSplats,
+            attributes: payload.attributes,
+            frameStrideBytes: payload.frameStrideBytes,
+            chunkFrameCount: payload.chunkFrameCount,
+            textureWidth: payload.textureSnapshot.textureWidth,
+            textureHeight: payload.textureSnapshot.textureHeight,
+            baseTransformA: payload.textureSnapshot.baseTransformA,
+            baseTransformB: payload.textureSnapshot.baseTransformB,
+            indices
+        }, transfers);
+    }
+
+    setAvailableFrames(availableFrames: number) {
+        this.worker.postMessage({
+            type: 'extendAvailableFrames',
+            availableFrames
+        });
+    }
+
+    prepare(frame: number) {
+        const id = this.nextId++;
+        const promise = new Promise<MotionPreparedFrame | null>((resolve, reject) => {
+            this.pending.set(id, { resolve, reject });
+        });
+        this.worker.postMessage({ type: 'prepare', id, frame });
+        return promise;
+    }
+
+    destroy() {
+        for (const pending of this.pending.values()) {
+            pending.resolve(null);
+        }
+        this.pending.clear();
+        this.worker.postMessage({ type: 'destroy' });
+        this.worker.terminate();
+    }
+}
+
 const chooseHardProxyGroups = (proxySkinning: ArrayBuffer, count: number, blendCount: number) => {
     const groupIds = new Uint32Array(proxySkinning, 0, count * blendCount);
     const weights = new Float32Array(proxySkinning, groupIds.byteLength, count * blendCount);
@@ -204,8 +336,30 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
         if (!track?.proxyPalette || !track.target || !track.indices) {
             return;
         }
-        track.target.restoreMotionProxyPalette(track.indices, track.proxyPalette.previousTransformIndices);
-        track.proxyPalette = null;
+        track.target.restoreMotionProxyPalette(track.indices, track.proxyPalette.previousTransformIndices, track.proxyPalette.groupCount);
+        track.proxyPalette = undefined;
+    };
+
+    const disposeTrack = (track: PhysMotionTrack | null) => {
+        if (!track || track.disposed) {
+            return;
+        }
+        track.disposed = true;
+        restoreProxyPalette(track);
+        track.preparedClient?.destroy();
+        track.preparedClient = undefined;
+        track.preparedFrameCache.clear();
+        track.frameCache.clear();
+        track.target = undefined;
+        track.binary = undefined;
+        track.indices = undefined;
+        track.proxyMotion = undefined;
+        track.proxySkinning = undefined;
+        track.proxyRestCenters = undefined;
+        track.proxyRestPositions = undefined;
+        track.proxyRestRotations = undefined;
+        track.proxyRestScales = undefined;
+        track.proxyPalette = undefined;
     };
 
     const resolveTarget = () => {
@@ -232,6 +386,9 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
     };
 
     const ensureFrameChunk = (track: PhysMotionTrack, frame: number) => {
+        if (track.disposed) {
+            return Promise.reject(new Error('Motion track has been disposed'));
+        }
         if (track.binary) {
             return Promise.resolve(track.binary);
         }
@@ -249,7 +406,10 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
         const frameCount = Math.min(track.chunkFrameCount, track.manifest.frameCount - startFrame);
         const startByte = startFrame * track.frameStrideBytes;
         const endByte = (startFrame + frameCount) * track.frameStrideBytes;
-        const promise = readUrlRange(track.binaryUrl, startByte, endByte);
+        const promise = readUrlRange(track.binaryUrl, startByte, endByte).catch((error): never => {
+            track.frameCache.delete(chunkIndex);
+            throw error;
+        });
         track.frameCache.set(chunkIndex, promise);
 
         const maxCachedChunks = Math.max(2, Math.floor(track.cacheBudgetBytes / Math.max(track.frameStrideBytes * track.chunkFrameCount, 1)));
@@ -262,6 +422,9 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
         }
 
         void promise.then(() => {
+            if (track.disposed) {
+                return;
+            }
             const nextChunk = chunkIndex + 1;
             if (nextChunk * track.chunkFrameCount < track.manifest.frameCount && !track.frameCache.has(nextChunk)) {
                 void ensureFrameChunk(track, nextChunk * track.chunkFrameCount);
@@ -272,6 +435,9 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
     };
 
     const decodeFrame = async (track: PhysMotionTrack, frame: number) => {
+        if (track.disposed) {
+            return null;
+        }
         const proxyFrame = decodeProxyFrame(track, frame);
         if (proxyFrame) {
             return proxyFrame;
@@ -281,6 +447,9 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
         const attributes = manifest.attributes ?? ['position'];
         const count = indices ? indices.length : manifest.numSplats;
         const binary = await ensureFrameChunk(track, frame);
+        if (track.disposed) {
+            return null;
+        }
         const chunkStartFrame = track.binary ? 0 : Math.floor(frame / track.chunkFrameCount) * track.chunkFrameCount;
         const byteOffset = (frame - chunkStartFrame) * frameStrideBytes;
         const floatOffset = byteOffset / Float32Array.BYTES_PER_ELEMENT;
@@ -311,6 +480,9 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
     };
 
     const decodeProxyFrame = (track: PhysMotionTrack, frame: number) => {
+        if (track.disposed) {
+            return null;
+        }
         const { manifest, indices, proxyMotion, proxySkinning } = track;
         const proxy = manifest.proxy;
         if (!proxy || !indices || (!proxyMotion && !track.proxyMotionUrl) || !proxySkinning || !track.target) {
@@ -433,8 +605,304 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
         };
     };
 
+    const isPromiseLike = (value: unknown): value is Promise<MotionPreparedFrame | null> => {
+        return !!value && typeof (value as any).then === 'function';
+    };
+
+    const updateEma = (current: number, sample: number, alpha = 0.25) => (
+        current > 0 ? current * (1 - alpha) + sample * alpha : sample
+    );
+
+    const circularDistance = (a: number, b: number, n: number) => {
+        if (n <= 0) {
+            return Math.abs(a - b);
+        }
+        const d = Math.abs(a - b);
+        return Math.min(d, n - d);
+    };
+
+    const canLoopPreparedFrames = (track: PhysMotionTrack) => (
+        track.availableFrames >= track.manifest.frameCount && track.manifest.frameCount > 0
+    );
+
+    const preparedFrameDistance = (frame: number, keepFrame: number, track: PhysMotionTrack) => (
+        canLoopPreparedFrames(track)
+            ? circularDistance(frame, keepFrame, track.manifest.frameCount)
+            : Math.abs(frame - keepFrame)
+    );
+
+    const preparedFrameStats = (track: PhysMotionTrack) => {
+        let resolvedCount = 0;
+        let pendingCount = 0;
+        let resolvedBytes = 0;
+        for (const value of track.preparedFrameCache.values()) {
+            if (!value) {
+                continue;
+            }
+            if (isPromiseLike(value)) {
+                pendingCount++;
+            } else {
+                resolvedCount++;
+                resolvedBytes += value.bytes;
+            }
+        }
+        return { resolvedCount, pendingCount, resolvedBytes };
+    };
+
+    const canWarmFullPreparedLoop = (track: PhysMotionTrack) => {
+        if (!motionPrewarmEnabled || !track.preparedClient || track.availableFrames < track.manifest.frameCount) {
+            return false;
+        }
+        if (track.manifest.frameCount > motionPrewarmMaxFrames) {
+            return false;
+        }
+        const preparedBytes = Math.max(track.preparedBytesEstimate || track.frameStrideBytes, 1);
+        return track.manifest.frameCount * preparedBytes <= track.preparedCacheBudgetBytes;
+    };
+
+    const logPreparedFrameStats = (track: PhysMotionTrack, prepared: MotionPreparedFrame) => {
+        if (!motionProfileEnabled || !prepared.stats) {
+            return;
+        }
+
+        const stats = prepared.stats;
+        const cacheStats = preparedFrameStats(track);
+        console.table({
+            frame: stats.frame,
+            preparedMB: (stats.totalBytes / bytesPerMiB).toFixed(1),
+            touchedRows: `${stats.touchedRowCount}/${stats.textureHeight}`,
+            touchedRatio: stats.touchedRowRatio.toFixed(3),
+            rowRanges: stats.rowRangeCount,
+            decodeMs: stats.decodeMs.toFixed(2),
+            packMs: stats.packMs.toFixed(2),
+            cacheMB: (cacheStats.resolvedBytes / bytesPerMiB).toFixed(1),
+            budgetMB: (track.preparedCacheBudgetBytes / bytesPerMiB).toFixed(1),
+            pending: cacheStats.pendingCount
+        });
+
+        if (stats.touchedRowRatio > 0.5) {
+            console.warn(
+                `[physmotion] high touched row ratio ${stats.touchedRowRatio.toFixed(2)}; consider static/dynamic splat split or dynamic index compaction`
+            );
+        }
+    };
+
+    const setPlaybackFrameRate = (track: PhysMotionTrack) => {
+        const frameRate = track.manifest.frameRate;
+        if (!frameRate) {
+            return;
+        }
+        const streaming = !!track.binaryUrl && track.availableFrames < track.manifest.frameCount;
+        const warmingPreparedLoop = canWarmFullPreparedLoop(track) && !track.preparedWarmupCompleted;
+        const playbackFrameRate = streaming
+            ? Math.min(frameRate, track.streamPreviewFrameRate ?? 12)
+            : warmingPreparedLoop
+                ? Math.min(frameRate, track.streamPreviewFrameRate ?? 12)
+            : frameRate;
+        events.fire('timeline.setFrameRate', playbackFrameRate);
+    };
+
+    const evictPreparedFrames = (track: PhysMotionTrack, keepFrame: number) => {
+        if (track.disposed) {
+            return;
+        }
+        let totalBytes = 0;
+        const resolved: Array<[number, MotionPreparedFrame]> = [];
+        for (const [frame, value] of track.preparedFrameCache.entries()) {
+            if (!value || isPromiseLike(value)) {
+                continue;
+            }
+            resolved.push([frame, value]);
+            totalBytes += value.bytes;
+        }
+        if (totalBytes <= track.preparedCacheBudgetBytes) {
+            return;
+        }
+
+        resolved.sort((a, b) => (
+            preparedFrameDistance(b[0], keepFrame, track) - preparedFrameDistance(a[0], keepFrame, track)
+        ));
+        for (const [frame, value] of resolved) {
+            if (frame === keepFrame || value.pinned) {
+                continue;
+            }
+            track.preparedFrameCache.delete(frame);
+            totalBytes -= value.bytes;
+            if (totalBytes <= track.preparedCacheBudgetBytes) {
+                break;
+            }
+        }
+    };
+
+    const maxPendingPreparedFrames = (track: PhysMotionTrack) => {
+        const preparedBytes = Math.max(track.preparedBytesEstimate || track.frameStrideBytes, 1);
+        const budgetFrames = Math.floor(track.preparedCacheBudgetBytes / preparedBytes);
+        if (budgetFrames <= 1) {
+            return 1;
+        }
+        return Math.max(1, Math.min(8, Math.floor(budgetFrames / 2)));
+    };
+
+    const requestPreparedFrame = (track: PhysMotionTrack, frame: number) => {
+        if (track.disposed || !track.preparedClient || frame < 0 || frame >= track.availableFrames || frame >= track.manifest.frameCount) {
+            return Promise.resolve(null);
+        }
+        const cached = track.preparedFrameCache.get(frame);
+        if (cached !== undefined) {
+            return isPromiseLike(cached) ? cached : Promise.resolve(cached);
+        }
+
+        const requestStart = performance.now();
+        const promise = track.preparedClient.prepare(frame).then((prepared) => {
+            if (track.disposed) {
+                track.preparedFrameCache.delete(frame);
+                return null;
+            }
+            if (!prepared) {
+                track.preparedFrameCache.delete(frame);
+                return null;
+            }
+            const requestMs = performance.now() - requestStart;
+            prepared.timings = {
+                ...(prepared.timings ?? {}),
+                request: +requestMs.toFixed(2)
+            };
+            track.preparedFrameCache.set(frame, prepared);
+            track.preparedBytesEstimate = Math.max(track.preparedBytesEstimate, prepared.bytes);
+            track.preparedRequestMsEstimate = updateEma(track.preparedRequestMsEstimate, requestMs);
+            evictPreparedFrames(track, track.requestedFrame);
+            logPreparedFrameStats(track, prepared);
+            return prepared;
+        }).catch((error): MotionPreparedFrame | null => {
+            track.preparedFrameCache.delete(frame);
+            if (track.disposed) {
+                return null;
+            }
+            throw error;
+        });
+        track.preparedFrameCache.set(frame, promise);
+        return promise;
+    };
+
+    const markPreparedWarmupIfReady = (track: PhysMotionTrack, orderedFrames: number[]) => {
+        if (track.preparedWarmupCompleted || !canWarmFullPreparedLoop(track)) {
+            return;
+        }
+        let resolvedBytes = 0;
+        for (const frame of orderedFrames) {
+            const cached = track.preparedFrameCache.get(frame);
+            if (!cached || isPromiseLike(cached)) {
+                return;
+            }
+            resolvedBytes += cached.bytes;
+        }
+        if (resolvedBytes > track.preparedCacheBudgetBytes) {
+            return;
+        }
+        for (const frame of orderedFrames) {
+            const cached = track.preparedFrameCache.get(frame);
+            if (cached && !isPromiseLike(cached)) {
+                cached.pinned = true;
+            }
+        }
+        track.preparedWarmupCompleted = true;
+        track.preparedWarmupStatusFrameCount = orderedFrames.length;
+        setPlaybackFrameRate(track);
+        events.fire(
+            'physics.status',
+            `动画帧缓存完成：${orderedFrames.length}/${track.manifest.frameCount} 帧，单帧 prepare 约 ${track.preparedRequestMsEstimate.toFixed(1)}ms，上传约 ${track.preparedApplyMsEstimate.toFixed(1)}ms`
+        );
+    };
+
+    const plannedPreparedFrames = (track: PhysMotionTrack, frame: number) => {
+        if (canWarmFullPreparedLoop(track)) {
+            return Array.from({ length: track.manifest.frameCount }, (_value, index) => index);
+        }
+
+        const available = Math.max(0, Math.min(track.availableFrames, track.manifest.frameCount));
+        if (available <= 0) {
+            return [];
+        }
+
+        const clampedFrame = Math.max(0, Math.min(frame, available - 1));
+        const preparedBytes = Math.max(track.preparedBytesEstimate || track.frameStrideBytes, 1);
+        const budgetFrames = Math.max(1, Math.floor(track.preparedCacheBudgetBytes / preparedBytes));
+        const frameRate = track.manifest.frameRate || 30;
+        const frameIntervalMs = 1000 / Math.max(frameRate, 1);
+        const measuredFrames = Math.ceil(
+            (track.preparedRequestMsEstimate + track.preparedApplyMsEstimate) / Math.max(frameIntervalMs, 1)
+        );
+        const lookaheadFrames = Math.max(
+            0,
+            Math.min(8, budgetFrames - 1, measuredFrames + 6)
+        );
+        const ordered: number[] = [clampedFrame];
+        const canWrap = canLoopPreparedFrames(track);
+        for (let offset = 1; offset <= lookaheadFrames; ++offset) {
+            let nextFrame = clampedFrame + offset;
+            if (nextFrame >= available) {
+                if (!canWrap) {
+                    break;
+                }
+                nextFrame = nextFrame % track.manifest.frameCount;
+            }
+            ordered.push(nextFrame);
+        }
+        return Array.from(new Set(ordered));
+    };
+
+    const schedulePreparedLookahead = (track: PhysMotionTrack, frame: number) => {
+        if (track.disposed || !track.preparedClient || track.availableFrames <= 0) {
+            return;
+        }
+        const orderedFrames = plannedPreparedFrames(track, frame);
+        if (orderedFrames.length === 0) {
+            return;
+        }
+        const pendingBudget = maxPendingPreparedFrames(track);
+        let pendingCount = preparedFrameStats(track).pendingCount;
+        let started = 0;
+
+        for (const nextFrame of orderedFrames) {
+            const cached = track.preparedFrameCache.get(nextFrame);
+            if (cached !== undefined) {
+                continue;
+            }
+
+            if (pendingCount >= pendingBudget) {
+                break;
+            }
+
+            pendingCount++;
+            started++;
+
+            void requestPreparedFrame(track, nextFrame)
+                .then((prepared) => {
+                    if (prepared && !track.disposed && activeTrack === track) {
+                        markPreparedWarmupIfReady(track, orderedFrames);
+                        schedulePreparedLookahead(track, track.requestedFrame);
+                    }
+                })
+                .catch((error) => {
+                    if (!track.disposed) {
+                        console.warn('[physmotion] prepared lookahead failed', nextFrame, error);
+                    }
+                });
+        }
+
+        markPreparedWarmupIfReady(track, orderedFrames);
+        if (started > 0 && canWarmFullPreparedLoop(track) && track.preparedWarmupStatusFrameCount !== orderedFrames.length) {
+            track.preparedWarmupStatusFrameCount = orderedFrames.length;
+            const stats = preparedFrameStats(track);
+            events.fire(
+                'physics.status',
+                `warming full motion cache: ${stats.resolvedCount + stats.pendingCount}/${orderedFrames.length} frames; playback frame rate will restore after warmup`
+            );
+        }
+    };
+
     const setFrame = async (frame: number) => {
-        if (!activeTrack) {
+        if (!activeTrack || activeTrack.disposed) {
             return;
         }
 
@@ -443,6 +911,11 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
             return;
         }
         activeTrack.requestedFrame = frame;
+        if (frame >= activeTrack.availableFrames) {
+            events.fire('physics.status', `buffering motion frame ${frame + 1}/${manifest.frameCount}; available ${activeTrack.availableFrames}`);
+            schedulePreparedLookahead(activeTrack, Math.max(0, activeTrack.availableFrames - 1));
+            return;
+        }
 
         if (applying) {
             setFrameAgain = true;
@@ -451,32 +924,73 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
 
         applying = true;
         try {
-            while (activeTrack) {
+            while (activeTrack && !activeTrack.disposed) {
+                const track = activeTrack;
                 setFrameAgain = false;
-                const frameToApply = activeTrack.requestedFrame;
-                const target = activeTrack.target?.visible ? activeTrack.target : resolveTarget();
+                const frameToApply = track.requestedFrame;
+                if (frameToApply >= track.availableFrames) {
+                    events.fire('physics.status', `buffering motion frame ${frameToApply + 1}/${manifest.frameCount}; available ${track.availableFrames}`);
+                    schedulePreparedLookahead(track, Math.max(0, track.availableFrames - 1));
+                    break;
+                }
+                const target = track.target?.visible ? track.target : resolveTarget();
                 if (!target) {
                     return;
                 }
-                activeTrack.target = target;
+                track.target = target;
 
-                if (target.splatData.numSplats !== manifest.numSplats && !activeTrack.indices) {
+                if (target.splatData.numSplats !== manifest.numSplats && !track.indices) {
                     throw new Error(`motion numSplats=${manifest.numSplats} does not match loaded splat numSplats=${target.splatData.numSplats}`);
                 }
 
-                await target.applyMotionFrame(await decodeFrame(activeTrack, frameToApply));
-                if (frameToApply !== activeTrack.appliedFrame && activeTrack.appliedFrame !== -1) {
-                    const skipped = Math.max(0, Math.abs(frameToApply - activeTrack.appliedFrame) - 1);
-                    activeTrack.droppedFrames += skipped;
+                if (track.preparedClient) {
+                    const prepared = await requestPreparedFrame(track, frameToApply);
+                    if (!prepared || track.disposed || activeTrack !== track) {
+                        events.fire('physics.status', `buffering motion frame ${frameToApply + 1}/${manifest.frameCount}`);
+                        break;
+                    }
+                    if (track.requestedFrame !== frameToApply && setFrameAgain) {
+                        continue;
+                    }
+                    const applyStart = performance.now();
+                    const ok = await target.applyPreparedMotionFrame(prepared, track.indices);
+                    if (track.disposed || activeTrack !== track) {
+                        break;
+                    }
+                    if (!ok) {
+                        events.fire('physics.status', `failed to upload prepared motion frame ${frameToApply + 1}/${manifest.frameCount}`);
+                        break;
+                    }
+                    track.preparedApplyMsEstimate = updateEma(track.preparedApplyMsEstimate, performance.now() - applyStart);
+                    schedulePreparedLookahead(track, frameToApply);
+                } else {
+                    const decoded = await decodeFrame(track, frameToApply);
+                    if (!decoded || track.disposed || activeTrack !== track) {
+                        break;
+                    }
+                    await target.applyMotionFrame(decoded);
+                    if (track.disposed || activeTrack !== track) {
+                        break;
+                    }
                 }
-                activeTrack.appliedFrame = frameToApply;
+                if (frameToApply !== track.appliedFrame && track.appliedFrame !== -1) {
+                    const skipped = Math.max(0, Math.abs(frameToApply - track.appliedFrame) - 1);
+                    track.droppedFrames += skipped;
+                }
+                track.appliedFrame = frameToApply;
 
-                if (!setFrameAgain || activeTrack.requestedFrame === frameToApply) {
+                if (!setFrameAgain || track.requestedFrame === frameToApply) {
                     break;
                 }
             }
         } finally {
+            const rerunRequested = setFrameAgain && !!activeTrack && !activeTrack.disposed;
             applying = false;
+            if (rerunRequested) {
+                const requestedFrame = activeTrack.requestedFrame;
+                setFrameAgain = false;
+                void setFrame(requestedFrame);
+            }
         }
     };
 
@@ -494,7 +1008,8 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
             if (!manifest.binary || !manifest.frameCount || !manifest.numSplats) {
                 throw new Error('Motion manifest must define binary, frameCount, and numSplats');
             }
-            restoreProxyPalette(activeTrack);
+            disposeTrack(activeTrack);
+            activeTrack = null;
 
             const binaryFile = findFile(files, manifest.binary);
             if (!binaryFile) {
@@ -589,14 +1104,42 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
                 throw new Error(`Motion binary is too small for ${manifest.frameCount} frames`);
             }
 
-            const streamCacheBudgetBytes = 96 * 1024 * 1024;
-            const chunkTargetBytes = 12 * 1024 * 1024;
+            const deviceMemoryGB = Math.max(1, Math.min(8, Number((navigator as any).deviceMemory) || 4));
+            const streamCacheBudgetBytes = Math.round(Math.max(32, Math.min(64, deviceMemoryGB * 12))) * bytesPerMiB;
+            const preparedCacheBudgetBytes = Math.round(Math.max(96, Math.min(256, deviceMemoryGB * 48))) * bytesPerMiB;
+            const chunkTargetBytes = 12 * bytesPerMiB;
             const chunkFrameCount = Math.max(1, Math.min(8, Math.floor(chunkTargetBytes / frameStrideBytes) || 1));
+            const manifestAvailableFrames = manifest.availableFrames === undefined
+                ? manifest.frameCount
+                : Number(manifest.availableFrames);
+            const availableFrames = Math.max(
+                0,
+                Math.min(Math.floor(Number.isFinite(manifestAvailableFrames) ? manifestAvailableFrames : manifest.frameCount), manifest.frameCount)
+            );
+            let preparedClient: MotionWorkerClient | undefined;
+            if (streamBinary && target && !proxyMotion && !proxySkinning) {
+                const textureSnapshot = target.getMotionTextureSnapshot();
+                if (textureSnapshot) {
+                    preparedClient = new MotionWorkerClient();
+                    preparedClient.init({
+                        binaryUrl: binaryFile.url!,
+                        frameCount: manifest.frameCount,
+                        availableFrames,
+                        numSplats: manifest.numSplats,
+                        attributes,
+                        frameStrideBytes,
+                        chunkFrameCount,
+                        textureSnapshot,
+                        indices
+                    });
+                }
+            }
             activeTrack = {
                 manifest: {
                     ...manifest,
                     attributes
                 },
+                disposed: false,
                 binary,
                 binaryUrl: streamBinary ? binaryFile.url : undefined,
                 indices,
@@ -616,25 +1159,37 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
                 cacheBudgetBytes: streamCacheBudgetBytes,
                 requestedFrame: 0,
                 appliedFrame: -1,
-                droppedFrames: 0
+                droppedFrames: 0,
+                availableFrames,
+                preparedClient,
+                preparedFrameCache: new Map(),
+                preparedCacheBudgetBytes,
+                preparedBytesEstimate: frameStrideBytes,
+                preparedRequestMsEstimate: 0,
+                preparedApplyMsEstimate: 0,
+                preparedWarmupCompleted: false,
+                preparedWarmupStatusFrameCount: 0,
+                streamPreviewFrameRate: 12
             };
 
             events.fire('timeline.setFrames', manifest.frameCount);
-            const playbackFrameRate = streamBinary ? Math.min(manifest.frameRate ?? 30, 12) : manifest.frameRate;
-            if (playbackFrameRate) {
-                events.fire('timeline.setFrameRate', playbackFrameRate);
-            }
+            setPlaybackFrameRate(activeTrack);
             if (streamBinary) {
-                const suffix = manifest.frameRate && playbackFrameRate !== manifest.frameRate
-                    ? `；远程预览 ${playbackFrameRate} fps，原始动画 ${manifest.frameRate} fps`
+                const streamingPreview = availableFrames < manifest.frameCount;
+                const suffix = streamingPreview && manifest.frameRate
+                    ? `；边下边播预览 ${Math.min(manifest.frameRate, activeTrack.streamPreviewFrameRate ?? 12)} fps，完整缓存后恢复 ${manifest.frameRate} fps`
                     : '';
-                events.fire('physics.status', `动画包已启用按需加载：每块 ${chunkFrameCount} 帧，缓存预算约 ${Math.round(streamCacheBudgetBytes / 1024 / 1024)}MB${suffix}`);
+                const preparedSuffix = preparedClient ? '；full motion worker 已启用' : '；worker 不可用，回退主线程应用';
+                events.fire('physics.status', `动画包已启用按需加载：每块 ${chunkFrameCount} 帧，raw 缓存约 ${Math.round(streamCacheBudgetBytes / 1024 / 1024)}MB，prepared 缓存约 ${Math.round(preparedCacheBudgetBytes / 1024 / 1024)}MB${suffix}${preparedSuffix}`);
             } else if (manifest.proxy && proxySkinning) {
                 const proxyBytes = (proxyMotion?.byteLength ?? 0) + proxySkinning.byteLength;
                 const suffix = proxyMotionUrl ? '；proxy motion 按需读取' : '';
                 events.fire('physics.status', `Spark-style proxy 预览已启用：${manifest.proxy.groupCount} 组，轻量数据约 ${Math.max(1, Math.round(proxyBytes / 1024 / 1024))}MB${suffix}`);
             }
             await setFrame(0);
+            if (activeTrack?.preparedClient) {
+                schedulePreparedLookahead(activeTrack, 0);
+            }
             events.fire('physmotion.loaded', activeTrack);
 
             return target;
@@ -644,7 +1199,7 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
     });
 
     events.function('physmotion.clear', () => {
-        restoreProxyPalette(activeTrack);
+        disposeTrack(activeTrack);
         activeTrack = null;
         setFrameAgain = false;
     });
@@ -726,6 +1281,24 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
         };
     });
 
+    events.function('physmotion.extendAvailableFrames', (availableFrames: number) => {
+        if (!activeTrack) {
+            return 0;
+        }
+        const nextAvailable = Math.max(
+            activeTrack.availableFrames,
+            Math.min(Math.max(0, Math.floor(Number(availableFrames) || 0)), activeTrack.manifest.frameCount)
+        );
+        activeTrack.availableFrames = nextAvailable;
+        activeTrack.preparedClient?.setAvailableFrames(nextAvailable);
+        setPlaybackFrameRate(activeTrack);
+        schedulePreparedLookahead(activeTrack, Math.max(0, Math.min(activeTrack.requestedFrame, nextAvailable - 1)));
+        if (activeTrack.requestedFrame < nextAvailable) {
+            void setFrame(activeTrack.requestedFrame);
+        }
+        return activeTrack.availableFrames;
+    });
+
     events.function('physmotion.setFrameAsync', async (frame: number) => {
         await setFrame(frame);
         return activeTrack?.target ?? null;
@@ -736,7 +1309,7 @@ const registerPhysMotionEvents = (events: Events, _scene: Scene) => {
     });
 
     events.on('scene.clear', () => {
-        restoreProxyPalette(activeTrack);
+        disposeTrack(activeTrack);
         activeTrack = null;
         setFrameAgain = false;
     });
