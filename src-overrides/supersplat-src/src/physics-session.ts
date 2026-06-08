@@ -128,6 +128,9 @@ type PhysicsPayload = {
             stiffness_scale?: number;
             n_min?: number;
             n_max?: number;
+            elastic_relaxation?: number;
+            relaxation?: number;
+            elasticRelaxation?: number;
             plastic_mode?: number;
             yield_min?: number;
             yield_max?: number;
@@ -1240,6 +1243,7 @@ const registerPhysicsSessionEvents = (events: Events) => {
         pbmpm: {
             n_min: 3,
             n_max: 25,
+            elastic_relaxation: 1.5,
             plastic_mode: 0,
             yield_min: 0.55,
             yield_max: 1.85

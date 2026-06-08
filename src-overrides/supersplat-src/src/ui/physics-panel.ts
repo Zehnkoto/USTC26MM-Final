@@ -365,6 +365,7 @@ class PhysicsPanel extends Container {
         const implicitNewtonMaxIter = numeric(16, 0, 1, 128);
         const pbmpmNMin = numeric(3, 0, 1, 256);
         const pbmpmNMax = numeric(25, 0, 1, 512);
+        const pbmpmElasticRelaxation = numeric(1.5, 3, 0, 2);
         const pbmpmPlasticMode = numeric(0, 0, 0, 1);
         const pbmpmYieldMin = numeric(0.55, 4, 0.01, 10);
         const pbmpmYieldMax = numeric(1.85, 4, 0.01, 10);
@@ -434,6 +435,7 @@ class PhysicsPanel extends Container {
                 pbmpm: {
                     n_min: pbmpmNMin.value,
                     n_max: pbmpmNMax.value,
+                    elastic_relaxation: pbmpmElasticRelaxation.value,
                     plastic_mode: pbmpmPlasticMode.value,
                     yield_min: pbmpmYieldMin.value,
                     yield_max: pbmpmYieldMax.value
@@ -581,6 +583,9 @@ class PhysicsPanel extends Container {
             if (currentSimulation.pbmpm) {
                 if (currentSimulation.pbmpm.n_min !== undefined) pbmpmNMin.value = currentSimulation.pbmpm.n_min;
                 if (currentSimulation.pbmpm.n_max !== undefined) pbmpmNMax.value = currentSimulation.pbmpm.n_max;
+                if (currentSimulation.pbmpm.elastic_relaxation !== undefined) pbmpmElasticRelaxation.value = currentSimulation.pbmpm.elastic_relaxation;
+                else if (currentSimulation.pbmpm.relaxation !== undefined) pbmpmElasticRelaxation.value = currentSimulation.pbmpm.relaxation;
+                else if (currentSimulation.pbmpm.elasticRelaxation !== undefined) pbmpmElasticRelaxation.value = currentSimulation.pbmpm.elasticRelaxation;
                 if (currentSimulation.pbmpm.plastic_mode !== undefined) pbmpmPlasticMode.value = currentSimulation.pbmpm.plastic_mode;
                 if (currentSimulation.pbmpm.yield_min !== undefined) pbmpmYieldMin.value = currentSimulation.pbmpm.yield_min;
                 if (currentSimulation.pbmpm.yield_max !== undefined) pbmpmYieldMax.value = currentSimulation.pbmpm.yield_max;
@@ -663,6 +668,7 @@ class PhysicsPanel extends Container {
             implicitNewtonMaxIter,
             pbmpmNMin,
             pbmpmNMax,
+            pbmpmElasticRelaxation,
             pbmpmPlasticMode,
             pbmpmYieldMin,
             pbmpmYieldMax
@@ -1277,6 +1283,7 @@ class PhysicsPanel extends Container {
             damping.value = payload.simulation.damping ?? 0.9999;
             pbmpmNMin.value = payload.simulation.pbmpm?.n_min ?? 3;
             pbmpmNMax.value = payload.simulation.pbmpm?.n_max ?? 25;
+            pbmpmElasticRelaxation.value = payload.simulation.pbmpm?.elastic_relaxation ?? payload.simulation.pbmpm?.relaxation ?? payload.simulation.pbmpm?.elasticRelaxation ?? 1.5;
             pbmpmPlasticMode.value = payload.simulation.pbmpm?.plastic_mode ?? 0;
             pbmpmYieldMin.value = payload.simulation.pbmpm?.yield_min ?? 0.55;
             pbmpmYieldMax.value = payload.simulation.pbmpm?.yield_max ?? 1.85;
@@ -1350,6 +1357,7 @@ class PhysicsPanel extends Container {
         const pbmpmFoldout = createFoldout('PBMPM Local-Global', false);
         pbmpmFoldout.body.append(createParamRow('N min', pbmpmNMin, 'PBMPM 自动映射 local/global 内步迭代下限；默认 3。'));
         pbmpmFoldout.body.append(createParamRow('N max', pbmpmNMax, 'PBMPM 自动映射 local/global 内步迭代上限；默认 25。'));
+        pbmpmFoldout.body.append(createParamRow('Relaxation', pbmpmElasticRelaxation, 'PBMPM elasticRelaxation 松弛系数；独立于 dt 和自动 N 映射，默认 1.5。'));
         pbmpmFoldout.body.append(createParamRow('Plastic mode', pbmpmPlasticMode, '0 使用显式/隐式 MPM 同源 material return mapping；1 使用 PBMPM stretch clamp。'));
         pbmpmFoldout.body.append(createParamRow('Yield min', pbmpmYieldMin, 'PBMPM 主方向伸缩下界，不是 material yield_stress。'));
         pbmpmFoldout.body.append(createParamRow('Yield max', pbmpmYieldMax, 'PBMPM 主方向伸缩上界，不是 material yield_stress。'));

@@ -398,6 +398,17 @@ def _pbmpm_config_from_simulation(simulation: dict[str, Any]) -> dict[str, Any]:
     config["n_min"] = n_min
     config["n_max"] = n_max
 
+    relaxation_raw = _first_present(
+        pbmpm_sim.get("elastic_relaxation"),
+        pbmpm_sim.get("relaxation"),
+        pbmpm_sim.get("elasticRelaxation"),
+        simulation.get("pbmpmElasticRelaxation"),
+        simulation.get("pbmpmRelaxation"),
+    )
+    config["elastic_relaxation"] = max(
+        0.0, min(_safe_float(relaxation_raw, 1.5), 2.0)
+    )
+
     plastic_mode_raw = _first_present(
         pbmpm_sim.get("plastic_mode"),
         simulation.get("pbmpmPlasticMode"),

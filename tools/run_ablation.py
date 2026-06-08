@@ -42,6 +42,7 @@ INTERNAL_ABLATION_FRAME_DT = "0.02"
 INTERNAL_ABLATION_SUBSTEP_DT = "0.0001"
 DEFAULT_TOLERANCE_PROFILE = "default"
 DEFAULT_PBMPM_STRENGTH_SCALE = "1.0"
+DEFAULT_PBMPM_ELASTIC_RELAXATION = 1.5
 
 TOLERANCE_PROFILES: dict[str, dict[str, Any]] = {
     "strict": {
@@ -409,6 +410,7 @@ def override_config(
             "strength_scale": strength,
             "n_min": 3,
             "n_max": 25,
+            "elastic_relaxation": DEFAULT_PBMPM_ELASTIC_RELAXATION,
             "plastic_mode": 0,
             "yield_min": 0.55,
             "yield_max": 1.85,
@@ -942,6 +944,9 @@ def collect_run_metrics(
             metrics[key] = implicit.get(key)
     elif experiment.method == "pbmpm":
         metrics["pbmpm_strength_scale"] = float(experiment.pbmpm_strength_scale or 1.0)
+        metrics["pbmpm_elastic_relaxation_config"] = (
+            config.get("pbmpm", {}).get("elastic_relaxation")
+        )
 
     metrics.update(summarize_trace(trace_path))
     if not success and metrics.get("trace_failure_reason"):

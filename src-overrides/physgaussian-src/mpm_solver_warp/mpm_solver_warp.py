@@ -43,7 +43,7 @@ class MPM_Simulator_WARP:
 
         self.mpm_model.update_cov_with_F = False
         self.mpm_model.pbmpm_elasticity_ratio = 0.75
-        self.mpm_model.pbmpm_elastic_relaxation = 1.0
+        self.mpm_model.pbmpm_elastic_relaxation = 1.5
         self.mpm_model.pbmpm_plastic_mode = 0
         self.mpm_model.pbmpm_yield_min = 0.55
         self.mpm_model.pbmpm_yield_max = 1.85
@@ -916,10 +916,6 @@ class MPM_Simulator_WARP:
         elasticity_ratio = alpha_min + (alpha_max - alpha_min) * s_E
         elasticity_ratio = min(max(elasticity_ratio, 0.0), 1.0)
 
-        omega_min = 0.5
-        omega_max = 1.0
-        elastic_relaxation = omega_min + (omega_max - omega_min) * s_iter
-        elastic_relaxation = min(max(elastic_relaxation, omega_min), omega_max)
         return {
             "base_E": float(base_E),
             "E": float(base_E),
@@ -945,7 +941,6 @@ class MPM_Simulator_WARP:
             "n_max": int(n_max),
             "final_iteration_count": int(iteration_count),
             "elasticity_ratio": float(elasticity_ratio),
-            "elastic_relaxation": float(elastic_relaxation),
             "iteration_count": int(iteration_count),
         }
 
@@ -976,19 +971,16 @@ class MPM_Simulator_WARP:
         ignored_iteration_controls = (
             iteration_count is not None or projection_iterations is not None
         )
-        ignored_elasticity_controls = (
-            elasticity_ratio is not None
-            or r_scale is not None
-            or elastic_relaxation is not None
-            or s_scale is not None
-        )
+        ignored_elasticity_controls = elasticity_ratio is not None or r_scale is not None
         auto_used = {
             "elasticity_ratio": True,
-            "elastic_relaxation": True,
+            "elastic_relaxation": False,
             "iteration_count": True,
         }
         elasticity_ratio = auto_params["elasticity_ratio"]
-        elastic_relaxation = auto_params["elastic_relaxation"]
+        if elastic_relaxation is None:
+            elastic_relaxation = s_scale if s_scale is not None else 1.5
+        elastic_relaxation = min(max(float(elastic_relaxation), 0.0), 2.0)
         iteration_count = auto_params["iteration_count"]
         self.mpm_model.pbmpm_elasticity_ratio = float(elasticity_ratio)
         self.mpm_model.pbmpm_elastic_relaxation = float(elastic_relaxation)
@@ -1018,7 +1010,7 @@ class MPM_Simulator_WARP:
                 f"iteration_count={int(iteration_count)}, "
                 f"final_iteration_count={int(iteration_count)}, "
                 f"N=[{auto_params['N_min']}, {auto_params['N_max']}], "
-                f"auto_used={auto_used}; "
+                f"auto_used={auto_used}, relaxation_source=direct_config; "
                 f"E={auto_params['E']:.6g}, "
                 f"E_effective={auto_params['E_effective']:.6g} "
                 f"(strength_scale={auto_params['strength_scale']:.6g}), "
@@ -1188,6 +1180,7 @@ class MPM_Simulator_WARP:
                     "yield_bounds_note": "yield_min/yield_max are PBMPM stretch clamp bounds, not material yield stress.",
                     "auto_mapping": auto_params,
                     "auto_used": auto_used,
+                    "relaxation_source": "direct_config",
                     "gravity_pre_kick": False,
                     "gravity_post_integrate_kick": True,
                     "plasticity_model": "physgaussian_material_return_mapping",

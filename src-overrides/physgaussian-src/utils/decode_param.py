@@ -225,6 +225,12 @@ def decode_param_json(json_file):
         "n_max": pbmpm_params.get(
             "n_max", pbmpm_params.get("N_max", pbmpm_params.get("nMax", 25))
         ),
+        "elastic_relaxation": pbmpm_params.get(
+            "elastic_relaxation",
+            pbmpm_params.get(
+                "relaxation", pbmpm_params.get("elasticRelaxation", 1.5)
+            ),
+        ),
         "plastic_mode": pbmpm_params.get("plastic_mode", 0),
         # PBMPM stretch clamp bounds, not material yield_stress.
         "yield_min": pbmpm_params.get("yield_min", 0.55),
