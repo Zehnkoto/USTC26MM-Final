@@ -1,7 +1,6 @@
 # USTC26MM Final
 
-This repository contains the curated source code for the USTC 2026 Multimedia
-final project. It combines the CG Final interactive physics project with the
+This repository contains the curated source code for the USTC 2026 MM final project. It combines the CG Final interactive physics project with the
 later SfM/COLMAP/3DGS reconstruction tools used for the report.
 
 Large generated outputs, datasets, checkpoints, motion packages, dense COLMAP
