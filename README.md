@@ -42,8 +42,3 @@ small overlay files are included.
   relaxed mapper runs, MVS selection, sparse point export, RoMa/COLMAP/3DGS
   comparison scripts, and PLY preview tooling.
 
-## Excluded
-
-Excluded by design: `node_modules/`, `dist/`, `build/`, `outputs/`, `runs/`,
-`dense/`, checkpoints, model weights, `.ply`, `.bin`, `.h5`, `.pt`, `.pth`,
-videos, zip/tar packages, logs, caches, and personal path manifests.
