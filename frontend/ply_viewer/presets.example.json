@@ -1,0 +1,10 @@
+[
+  {
+    "label": "Example SfM sparse point cloud",
+    "path": "C:/path/to/points3D.ply"
+  },
+  {
+    "label": "Example MVS fused point cloud",
+    "path": "C:/path/to/fused.ply"
+  }
+]

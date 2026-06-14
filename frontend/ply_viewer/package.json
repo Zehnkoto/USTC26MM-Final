@@ -1,0 +1,25 @@
+{
+  "name": "sfm-point-cloud-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "build": "vite build",
+    "preview": "node server.js --preview",
+    "test": "vitest run",
+    "check": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "vite": "^7.0.0",
+    "three": "^0.178.0",
+    "@react-three/fiber": "^9.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "jsdom": "^26.0.0"
+  }
+}

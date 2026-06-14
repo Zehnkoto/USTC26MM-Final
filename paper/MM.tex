@@ -1,0 +1,89 @@
+\documentclass[a4paper]{article}
+\usepackage{geometry}
+\geometry{left=1.8cm,right=1.8cm,top=1.8cm,bottom=1.8cm}
+\usepackage{ctex}
+\usepackage{graphicx,subcaption}
+\usepackage{amssymb}
+\usepackage{indentfirst}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{bm}
+\usepackage{lineno}
+\usepackage{setspace}
+\usepackage{booktabs,multirow}
+\usepackage{authblk}
+\usepackage{float}
+\usepackage[flushleft]{threeparttable}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{array}
+
+\lstset{
+    language=C++,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    stringstyle=\color{red},
+    commentstyle=\color{green!50!black}\itshape,
+    numberstyle=\tiny,
+    stepnumber=1,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    frame=single,
+    breaklines=true,
+    tabsize=4
+}
+
+\usepackage[colorlinks,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+
+\newcommand{\E}{\mathrm{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\Cov}{\mathrm{Cov}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\iid}{\mathrm{i.i.d.}\ }
+\newcommand{\normtwo}[1]{\|#1\|_2}
+\newcommand{\norminf}[1]{\|#1\|_\infty}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\upk}[1]{^{(#1)}}
+
+\title{\textbf{3DGS 重建与物理仿真扩展的数学建模报告}}
+\author{李亭皑\quad PB23010374\\施舒恒\quad PB23010324\\杨弘宇\quad PB23010350}
+\date{\today}
+
+\doublespacing
+
+\begin{document}
+
+\maketitle
+
+\section{项目概述}
+
+三维高斯泼溅是近年来用于多视角三维重建和实时新视角渲染的重要显式表示方法。针对原题中的数码相机定位与三维重建任务，本文首先基于 3DGS 原论文及其官方开源实现：将三维场景表示为高斯集合
+\[
+    \mathcal{G}
+    =
+    \left\{
+        \left(
+            \bm{\mu}_p,
+            \bm{\Sigma}_p,
+            \alpha_p,
+            \bm{c}_p
+        \right)
+    \right\}_{p=1}^{N},
+\]
+其中 $\bm{\mu}_p$ 表示第 $p$ 个 Gaussian 的中心位置，$\bm{\Sigma}_p$ 表示其各向异性协方差，$\alpha_p$ 表示不透明度，$\bm{c}_p$ 表示由球谐函数编码的视角相关颜色。该模型通过可微渲染将三维高斯投影为二维椭圆高斯，并以多视角图像误差为目标优化上述参数，从而完成静态三维场景重建。
+
+在完成 3DGS 重建的基础上，本文进一步将重建结果扩展为可交互的物理仿真系统。项目以前端开源 3DGS Web 编辑器 SuperSplat 为基础，增加区域选择、材料参数设置、边界条件指定、求解器选择和动画播放模块，并且优化了动画播放的速度。后端以 PhysGaussian 的显式 MPM 方法作为 baseline，将每个 Gaussian 视为连续体材料点，通过粒子到网格、网格更新和网格到粒子的传递过程更新位置与局部形变。
+
+为了改善显式方法在较大时间步和高刚度材料下的稳定性，本文参考 i-PhysGaussian 设计了隐式 MPM 求解器，将网格位移增量作为未知量，并采用 Newton--GMRES 方法求解隐式动量平衡残差。同时，本文参考 PBMPM 的位置约束思想实现了第三类求解器，将 Local--Global 迭代与 MPM 网格传递结合，并设计了由杨氏模量、泊松比、密度、时间步长和网格尺度到投影强度、松弛系数和迭代次数的参数映射。
+
+实验部分围绕显式 MPM、隐式 MPM 和 PBMPM 三类方法展开，比较它们在稳定性、动画连续性、参数敏感性和求解时间上的表现，并进一步对隐式 MPM 的收敛阈值以及 PBMPM 的物理量到投影参数转换系数进行消融分析。
+
+整体而言，本文以 3DGS 重建模型为核心表示，在保持其高效渲染优势的基础上，构建了一个从静态重建、交互选择、物理求解到动态播放的完整建模与仿真流程。
+
+
+\end{document}
